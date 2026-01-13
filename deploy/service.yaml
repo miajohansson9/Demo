@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: node-label-operator-metrics
+  namespace: node-label-operator
+  labels:
+    app: node-label-operator
+spec:
+  type: ClusterIP
+  selector:
+    app: node-label-operator
+  ports:
+  - name: metrics
+    port: 8080
+    targetPort: metrics
+    protocol: TCP

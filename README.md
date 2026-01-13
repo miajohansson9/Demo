@@ -121,12 +121,18 @@ Controller behavior is configured via environment variables in `deploy/deploymen
 - **Fast enough for demo**: 5-second interval detects changes quickly
 - **Fewer edge cases**: No need to handle watch timeouts, reconnections, etc.
 
+## Metrics
+
+**View metrics:**
+```bash
+make grafana
+# Opens http://localhost:3000 with pre-built dashboard
+```
+
 ## Production Considerations
 
 1. **Stable Node IDs**: Key ConfigMaps by cloud provider instance ID instead of node name (handles node renames)
-2. **Leader Election**: Run multiple replicas with leader election to avoid failed API calls
-3. **Metrics**: Add Prometheus metrics for monitoring
-4. **Watches**: Use watch API for lower latency in large clusters
-5. **Alerting**: Alert if labels fail to restore after N attempts
-6. **Prefix Configuration**: Make prefix configurable per-node or use CRDs for more control
-7 **Finalizers**: Use finalizers if API's need to finish their jobs/calls before they can stop
+2. **Leader Election**: Run multiple replicas with leader election for HA (automatic failover)
+3. **Watches**: Use watch API for lower latency in large clusters
+4. **Alerting**: Alert if labels fail to restore after N attempts (use Prometheus AlertManager)
+5. **Prefix Configuration**: Make prefix configurable per-node or use CRDs for more control

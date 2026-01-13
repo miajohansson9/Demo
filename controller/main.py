@@ -16,6 +16,7 @@ from typing import Dict, Optional
 
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
+from prometheus_client import Counter, Histogram, Gauge, start_http_server
 
 # Configuration from environment
 PERSIST_LABEL_PREFIX = os.getenv("PERSIST_LABEL_PREFIX", "persist.demo/")
@@ -34,6 +35,28 @@ logger = logging.getLogger(__name__)
 # Global API clients
 core_v1 = None
 
+# Prometheus metrics
+reconciliation_errors = Counter(
+    'node_label_reconciliation_errors_total',
+    'Total number of reconciliation errors'
+)
+reconciliation_duration = Histogram(
+    'node_label_reconciliation_duration_seconds',
+    'Time spent in reconciliation loop'
+)
+reconciliation_success = Gauge(
+    'node_label_reconciliation_success_timestamp',
+    'Timestamp of last successful reconciliation'
+)
+labels_restored = Counter(
+    'node_label_labels_restored_total',
+    'Total number of labels restored to nodes',
+    ['node', 'label_key', 'label_value']
+)
+nodes_monitored = Gauge(
+    'node_label_nodes_monitored',
+    'Number of nodes currently being monitored'
+)
 
 def configmap_name(node_name: str) -> str:
     """Generate ConfigMap name for a given node."""
@@ -143,6 +166,9 @@ def reconcile_node(node: client.V1Node):
     elif persisted_labels:
         # Node missing labels but ConfigMap has them → restore
         patch_node_labels(node_name, persisted_labels)
+        # Track each label individually
+        for label_key, label_value in persisted_labels.items():
+            labels_restored.labels(node=node_name, label_key=label_key, label_value=label_value).inc()
         logger.info(f"Restored labels for {node_name}: {persisted_labels}")
 
 
@@ -150,19 +176,30 @@ def reconcile_all_nodes():
     """
     Reconcile all nodes in the cluster.
     """
+    start_time = time.time()
     try:
         nodes = core_v1.list_node()
         logger.debug(f"Reconciling {len(nodes.items)} nodes")
+        
+        # Update gauge for nodes monitored
+        nodes_monitored.set(len(nodes.items))
         
         for node in nodes.items:
             try:
                 reconcile_node(node)
             except Exception as e:
                 logger.error(f"Error reconciling node {node.metadata.name}: {e}")
+                reconciliation_errors.inc()
                 # Continue with other nodes
-                
+        
+        # Record successful reconciliation
+        duration = time.time() - start_time
+        reconciliation_duration.observe(duration)
+        reconciliation_success.set(time.time())
+
     except ApiException as e:
         logger.error(f"Error listing nodes: {e}")
+        reconciliation_errors.inc()
         raise
 
 
@@ -206,6 +243,11 @@ def main():
     core_v1 = client.CoreV1Api()
     
     logger.info(f"Using namespace: {PRESERVER_NAMESPACE}")
+    
+    # Start Prometheus metrics server
+    metrics_port = int(os.getenv("METRICS_PORT", "8080"))
+    start_http_server(metrics_port)
+    logger.info(f"Metrics server started on port {metrics_port}")
     
     # Start controller loop
     run()

@@ -14,15 +14,21 @@ spec:
         app: node-label-operator
     spec:
       serviceAccountName: node-label-operator
-      # Allow scheduling on control-plane nodes
+      # Force scheduling on control-plane so controller survives worker node failures
       tolerations:
       - key: node-role.kubernetes.io/control-plane
         operator: Exists
         effect: NoSchedule
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
       containers:
       - name: controller
         image: node-label-operator:dev
         imagePullPolicy: Never
+        ports:
+        - name: metrics
+          containerPort: 8080
+          protocol: TCP
         env:
         - name: PERSIST_LABEL_PREFIX
           value: "persist.demo/"
