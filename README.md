@@ -6,9 +6,21 @@ A stateless Kubernetes controller that preserves and restores node labels across
 
 1. **Continuous Capture**: Controller polls all nodes every 5 seconds. When a node has labels matching the configured prefix (e.g., `persist.demo/*`), it saves them to a ConfigMap.
 
-2. **Automatic Restore**: When a node is missing expected labels (because it was recreated), the controller patches the node with labels from the ConfigMap.
+2. **Automatic Restore**: When a node is missing expected labels (because it was recreated), the controller patches the node with labels from the ConfigMap. **The ConfigMap is the source of truth** - if labels are removed or values are changed on the node, they are restored from the ConfigMap.
 
 3. **Stateless Design**: All state is stored in Kubernetes ConfigMaps. The controller can restart without losing track of persisted labels.
+
+### Edge Case Handling
+
+The controller handles several critical edge cases:
+
+- **Label Value Changes**: If a label exists on the node but has the wrong value, the controller detects this and restores the correct value from the ConfigMap.
+  
+- **Simultaneous Add/Remove**: If a label gets deleted and a new one gets added, the controller restores the deleted label (ConfigMap is authoritative) and persists the new label to the ConfigMap.
+
+- **Invalid ConfigMap Data**: If a ConfigMap contains corrupted JSON, the controller treats it as empty state and logs an error instead of crashing.
+
+- **Race Conditions**: During rolling updates or ConfigMap deletions, the controller gracefully retries operations to avoid errors when ConfigMaps are deleted between create/replace operations.
 
 ## Architecture
 
