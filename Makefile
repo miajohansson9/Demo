@@ -21,17 +21,10 @@ up:
 	@echo ""
 	@echo "Deploying controller..."
 	kubectl apply -f deploy/namespace.yaml
-	kubectl wait --for=jsonpath='{.status.phase}'=Active namespace/node-label-operator --timeout=30s
 	kubectl apply -f deploy/
 	@echo ""
 	@echo "Waiting for controller to be ready..."
 	kubectl -n node-label-operator rollout status deploy/node-label-operator --timeout=60s
-	@echo ""
-	@echo "Installing Kubernetes Dashboard..."
-	kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml
-	kubectl create serviceaccount admin-user -n kubernetes-dashboard
-	kubectl create clusterrolebinding admin-user --clusterrole=cluster-admin --serviceaccount=kubernetes-dashboard:admin-user
-	kubectl wait --for=condition=available --timeout=60s deployment/kubernetes-dashboard -n kubernetes-dashboard
 	@echo ""
 	@echo "Applying demo labels to worker nodes..."
 	kubectl label node nlo-demo-worker persist.demo/type=expensive --overwrite
@@ -47,10 +40,21 @@ up:
 
 down:
 	@pkill -f "kubectl proxy" 2>/dev/null || true
+	@pkill -f "kubectl port-forward" 2>/dev/null || true
 	kind delete cluster --name $(CLUSTER_NAME)
+	@rm -f dashboard-token.txt
 
 dashboard:
-	@echo "Starting Kubernetes Dashboard..."
+	@if ! kubectl get namespace kubernetes-dashboard >/dev/null 2>&1; then \
+		echo "Installing Kubernetes Dashboard..."; \
+		kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v2.7.0/aio/deploy/recommended.yaml; \
+		kubectl create serviceaccount admin-user -n kubernetes-dashboard; \
+		kubectl create clusterrolebinding admin-user --clusterrole=cluster-admin --serviceaccount=kubernetes-dashboard:admin-user; \
+		echo "Waiting for dashboard to be ready (this may take 30-60s on first run)..."; \
+		kubectl wait --for=condition=available --timeout=120s deployment/kubernetes-dashboard -n kubernetes-dashboard; \
+		echo ""; \
+	fi
+	@echo "Opening Kubernetes Dashboard..."
 	@echo ""
 	@echo "Dashboard URL:"
 	@echo "  http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/"

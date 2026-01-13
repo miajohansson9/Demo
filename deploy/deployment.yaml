@@ -32,7 +32,7 @@ spec:
         env:
         - name: PERSIST_LABEL_PREFIX
           value: "persist.demo/"
-        - name: PRESERVER_NAMESPACE
+        - name: OPERATOR_NAMESPACE
           value: "node-label-operator"
         - name: RECONCILE_INTERVAL_SECONDS
           value: "5"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Node Label Preserver Controller
+Node Label Operator Controller
 
 A stateless Kubernetes controller that preserves and restores node labels
 across node deletion/recreation events.
@@ -20,7 +20,7 @@ from prometheus_client import Counter, Histogram, Gauge, start_http_server
 
 # Configuration from environment
 PERSIST_LABEL_PREFIX = os.getenv("PERSIST_LABEL_PREFIX", "persist.demo/")
-PRESERVER_NAMESPACE = os.getenv("PRESERVER_NAMESPACE", "node-label-operator")
+OPERATOR_NAMESPACE = os.getenv("OPERATOR_NAMESPACE", "node-label-operator")
 RECONCILE_INTERVAL_SECONDS = int(os.getenv("RECONCILE_INTERVAL_SECONDS", "5"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
@@ -73,7 +73,7 @@ def load_configmap_state(node_name: str) -> Optional[Dict[str, str]]:
     try:
         cm = core_v1.read_namespaced_config_map(
             name=configmap_name(node_name),
-            namespace=PRESERVER_NAMESPACE
+            namespace=OPERATOR_NAMESPACE
         )
         state_json = cm.data.get("state.json", "{}")
         state = json.loads(state_json)
@@ -104,7 +104,7 @@ def save_configmap_state(node_name: str, labels: Dict[str, str]):
     
     try:
         core_v1.create_namespaced_config_map(
-            namespace=PRESERVER_NAMESPACE,
+            namespace=OPERATOR_NAMESPACE,
             body=cm
         )
         logger.info(f"Created ConfigMap for {node_name}")
@@ -112,7 +112,7 @@ def save_configmap_state(node_name: str, labels: Dict[str, str]):
         if e.status == 409:  # Already exists
             core_v1.replace_namespaced_config_map(
                 name=configmap_name(node_name),
-                namespace=PRESERVER_NAMESPACE,
+                namespace=OPERATOR_NAMESPACE,
                 body=cm
             )
             logger.debug(f"Updated ConfigMap for {node_name}")
@@ -209,7 +209,7 @@ def run():
     """
     logger.info("Starting node-label-operator")
     logger.info(f"  Label prefix: {PERSIST_LABEL_PREFIX}")
-    logger.info(f"  Namespace: {PRESERVER_NAMESPACE}")
+    logger.info(f"  Namespace: {OPERATOR_NAMESPACE}")
     logger.info(f"  Reconcile interval: {RECONCILE_INTERVAL_SECONDS}s")
     
     while True:
@@ -242,7 +242,7 @@ def main():
     # Initialize API client
     core_v1 = client.CoreV1Api()
     
-    logger.info(f"Using namespace: {PRESERVER_NAMESPACE}")
+    logger.info(f"Using namespace: {OPERATOR_NAMESPACE}")
     
     # Start Prometheus metrics server
     metrics_port = int(os.getenv("METRICS_PORT", "8080"))

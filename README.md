@@ -1,4 +1,4 @@
-# Node Label Preserver
+# Node Label Operator
 
 A stateless Kubernetes controller that preserves and restores node labels across node deletion/recreation events.
 
@@ -109,7 +109,7 @@ Controller behavior is configured via environment variables in `deploy/deploymen
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PERSIST_LABEL_PREFIX` | `persist.demo/` | Only labels with this prefix are preserved |
-| `PRESERVER_NAMESPACE` | `node-label-operator` | Namespace for state ConfigMaps |
+| `OPERATOR_NAMESPACE` | `node-label-operator` | Namespace for state ConfigMaps |
 | `RECONCILE_INTERVAL_SECONDS` | `5` | How often to check all nodes |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 
