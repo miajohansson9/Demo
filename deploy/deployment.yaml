@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: node-label-operator
+  namespace: node-label-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: node-label-operator
+  template:
+    metadata:
+      labels:
+        app: node-label-operator
+    spec:
+      serviceAccountName: node-label-operator
+      # Allow scheduling on control-plane nodes
+      tolerations:
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: controller
+        image: node-label-operator:dev
+        imagePullPolicy: Never
+        env:
+        - name: PERSIST_LABEL_PREFIX
+          value: "persist.demo/"
+        - name: PRESERVER_NAMESPACE
+          value: "node-label-operator"
+        - name: RECONCILE_INTERVAL_SECONDS
+          value: "5"
+        - name: LOG_LEVEL
+          value: "INFO"
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        livenessProbe:
+          exec:
+            command: ["python", "-c", "import sys; sys.exit(0)"]
+          initialDelaySeconds: 5
+          periodSeconds: 30
+      terminationGracePeriodSeconds: 10
