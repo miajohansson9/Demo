@@ -3,11 +3,16 @@ CLUSTER_NAME ?= nlo-demo
 help:
 	@echo "Node Label Operator - Makefile targets:"
 	@echo "  make up             - Create kind cluster and deploy controller"
+	@echo "  make test           - Run unit tests for the controller"
 	@echo "  make logs           - Tail controller logs"
 	@echo "  make grafana        - Open Grafana dashboard with metrics"
 	@echo "  make dashboard      - Open Kubernetes Dashboard (web UI)"
 	@echo "  make restart-worker - Restart a worker node after deleting from UI"
 	@echo "  make down           - Delete the kind cluster"
+
+test:
+	@echo "Running unit tests..."
+	@cd controller && python3 -m unittest test_main -v
 
 up:
 	@echo "Creating kind cluster..."
@@ -59,13 +64,14 @@ dashboard:
 	@echo "Dashboard URL:"
 	@echo "  http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/"
 	@echo ""
-	@if [ ! -s dashboard-token.txt ]; then \
+	@if [ ! -s dashboard-token.txt ] || ! kubectl auth can-i --list --token=$$(cat dashboard-token.txt) >/dev/null 2>&1; then \
 		kubectl -n kubernetes-dashboard create token admin-user --duration=24h > dashboard-token.txt; \
 	fi
 	@echo "Access Token (copy this):"
 	@cat dashboard-token.txt
 	@echo ""
 	@echo "Opening browser and starting proxy..."
+	@pkill -f "kubectl proxy" 2>/dev/null || true
 	@open "http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy/" 2>/dev/null || true
 	kubectl proxy
 

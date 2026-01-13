@@ -11,7 +11,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from kubernetes import client, config
@@ -68,7 +68,7 @@ def load_configmap_state(node_name: str) -> Optional[Dict[str, str]]:
     Load persisted label state from ConfigMap.
     
     Returns:
-        dict: Persisted labels, or None if ConfigMap doesn't exist
+        dict: Persisted labels, or None if ConfigMap doesn't exist or contains invalid data
     """
     try:
         cm = core_v1.read_namespaced_config_map(
@@ -76,8 +76,12 @@ def load_configmap_state(node_name: str) -> Optional[Dict[str, str]]:
             namespace=OPERATOR_NAMESPACE
         )
         state_json = cm.data.get("state.json", "{}")
-        state = json.loads(state_json)
-        return state.get("labels", {})
+        try:
+            state = json.loads(state_json)
+            return state.get("labels", {})
+        except json.JSONDecodeError as json_err:
+            logger.error(f"Invalid JSON in ConfigMap for {node_name}: {json_err}. Treating as empty state.")
+            return None
     except ApiException as e:
         if e.status == 404:
             return None
@@ -90,11 +94,12 @@ def save_configmap_state(node_name: str, labels: Dict[str, str]):
     Save label state to ConfigMap.
     
     Creates ConfigMap if it doesn't exist, updates if it does.
+    Handles race condition when ConfigMap is deleted between the 409 check and replace.
     """
     state = {
         "nodeName": node_name,
         "labels": labels,
-        "capturedAt": datetime.utcnow().isoformat() + "Z"
+        "capturedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     }
     
     cm = client.V1ConfigMap(
@@ -110,12 +115,25 @@ def save_configmap_state(node_name: str, labels: Dict[str, str]):
         logger.info(f"Created ConfigMap for {node_name}")
     except ApiException as e:
         if e.status == 409:  # Already exists
-            core_v1.replace_namespaced_config_map(
-                name=configmap_name(node_name),
-                namespace=OPERATOR_NAMESPACE,
-                body=cm
-            )
-            logger.debug(f"Updated ConfigMap for {node_name}")
+            try:
+                core_v1.replace_namespaced_config_map(
+                    name=configmap_name(node_name),
+                    namespace=OPERATOR_NAMESPACE,
+                    body=cm
+                )
+                logger.debug(f"Updated ConfigMap for {node_name}")
+            except ApiException as replace_err:
+                if replace_err.status == 404:
+                    # ConfigMap was deleted between 409 and replace - retry create
+                    logger.warning(f"ConfigMap deleted during update, recreating for {node_name}")
+                    core_v1.create_namespaced_config_map(
+                        namespace=OPERATOR_NAMESPACE,
+                        body=cm
+                    )
+                    logger.info(f"Created ConfigMap for {node_name} (retry)")
+                else:
+                    logger.error(f"Error replacing ConfigMap for {node_name}: {replace_err}")
+                    raise
         else:
             logger.error(f"Error saving ConfigMap for {node_name}: {e}")
             raise
@@ -140,9 +158,12 @@ def reconcile_node(node: client.V1Node):
     
     Algorithm:
     1. Extract owned labels from node (matching prefix)
-    2. Load persisted state from ConfigMap
-    3. If node has owned labels and they differ from ConfigMap → update ConfigMap
-    4. If node missing owned labels but ConfigMap has them → restore to node
+    2. Load persisted state from ConfigMap (or empty dict if none exists)
+    3. Calculate differences:
+       - labels_to_restore: labels missing from node OR with wrong values
+       - new_on_node: labels on node but not in ConfigMap (added)
+    4. If any labels need restoration → restore them
+    5. If any new labels on node → persist them to ConfigMap
     """
     node_name = node.metadata.name
     node_labels = node.metadata.labels or {}
@@ -151,25 +172,29 @@ def reconcile_node(node: client.V1Node):
     owned_labels = {
         k: v for k, v in node_labels.items()
         if k.startswith(PERSIST_LABEL_PREFIX)
-    }
+    } or {}
     
-    # Load persisted state
-    persisted_labels = load_configmap_state(node_name)
+    # Load persisted state (default to empty dict if no ConfigMap exists)
+    persisted_labels = load_configmap_state(node_name) or {}
     
-    # Decide action
-    if owned_labels:
-        # Node has owned labels → persist them (keep ConfigMap fresh)
-        if persisted_labels != owned_labels:
-            save_configmap_state(node_name, owned_labels)
-            logger.info(f"Captured labels for {node_name}: {owned_labels}")
+    # Calculate differences
+    labels_to_restore = {k: v for k, v in persisted_labels.items() 
+                         if k not in owned_labels or owned_labels[k] != v}
+    new_on_node = {k: v for k, v in owned_labels.items() if k not in persisted_labels}
     
-    elif persisted_labels:
-        # Node missing labels but ConfigMap has them → restore
-        patch_node_labels(node_name, persisted_labels)
-        # Track each label individually
-        for label_key, label_value in persisted_labels.items():
+    # Restore any labels that were removed or had values changed
+    if labels_to_restore:
+        patch_node_labels(node_name, labels_to_restore)
+        for label_key, label_value in labels_to_restore.items():
             labels_restored.labels(node=node_name, label_key=label_key, label_value=label_value).inc()
-        logger.info(f"Restored labels for {node_name}: {persisted_labels}")
+        logger.info(f"Restored labels for {node_name}: {labels_to_restore}")
+    
+    # Persist any new labels to ConfigMap
+    if new_on_node:
+        # Save all current owned labels (includes existing + new)
+        all_labels = {**persisted_labels, **owned_labels}
+        save_configmap_state(node_name, all_labels)
+        logger.info(f"Captured new labels for {node_name}: {new_on_node}")
 
 
 def reconcile_all_nodes():

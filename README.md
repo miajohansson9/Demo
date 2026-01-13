@@ -102,6 +102,21 @@ make restart-worker
 make down
 ```
 
+## Testing
+
+Run the unit test suite:
+
+```bash
+make test
+```
+
+The test suite covers critical edge cases including:
+- Label value changes detection
+- Invalid JSON in ConfigMap handling
+- Race conditions in ConfigMap operations
+
+See [`controller/TESTING.md`](controller/TESTING.md) for detailed test documentation.
+
 ## Configuration
 
 Controller behavior is configured via environment variables in `deploy/deployment.yaml`:
