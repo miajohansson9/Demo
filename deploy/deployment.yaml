@@ -25,17 +25,28 @@ spec:
       - name: controller
         image: node-label-operator:dev
         imagePullPolicy: Never
+        # Use kopf to run the controller with leader election and health probes
+        command: ["kopf", "run", "/app/main.py"]
+        args:
+          - --peering=node-label-operator
+          - --liveness=http://0.0.0.0:8080/healthz
+          - --standalone
         ports:
-        - name: metrics
+        - name: health
           containerPort: 8080
+          protocol: TCP
+        - name: metrics
+          containerPort: 9090
           protocol: TCP
         env:
         - name: PERSIST_LABEL_PREFIX
           value: "persist.demo/"
         - name: OPERATOR_NAMESPACE
           value: "node-label-operator"
-        - name: RECONCILE_INTERVAL_SECONDS
-          value: "5"
+        - name: RESYNC_INTERVAL_SECONDS
+          value: "300"
+        - name: METRICS_PORT
+          value: "9090"
         - name: LOG_LEVEL
           value: "INFO"
         resources:
@@ -45,9 +56,21 @@ spec:
           limits:
             cpu: 200m
             memory: 128Mi
+        # HTTP probes verify controller is actually processing events
         livenessProbe:
-          exec:
-            command: ["python", "-c", "import sys; sys.exit(0)"]
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
           initialDelaySeconds: 5
-          periodSeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
       terminationGracePeriodSeconds: 10

@@ -1,45 +1,56 @@
 # Node Label Operator
 
-A stateless Kubernetes controller that preserves and restores node labels across node deletion/recreation events.
+A Kubernetes controller that preserves and restores node labels across node deletion/recreation events, built with [kopf](https://kopf.readthedocs.io/).
 
 ## How It Works
 
-1. **Continuous Capture**: Controller polls all nodes every 5 seconds. When a node has labels matching the configured prefix (e.g., `persist.demo/*`), it saves them to a ConfigMap.
+The controller uses Kubernetes watch events to respond to node changes in real-time:
 
-2. **Automatic Restore**: When a node is missing expected labels (because it was recreated), the controller patches the node with labels from the ConfigMap. **The ConfigMap is the source of truth** - if labels are removed or values are changed on the node, they are restored from the ConfigMap.
+1. **Node Created** (`@kopf.on.create`): When a new node appears, the controller checks for stored labels in ConfigMap and applies them. **ConfigMap is authoritative for new/recreated nodes**.
 
-3. **Stateless Design**: All state is stored in Kubernetes ConfigMaps. The controller can restart without losing track of persisted labels.
+2. **Node Updated** (`@kopf.on.update`): When labels change on an existing node, the controller syncs those changes to ConfigMap. **Node is authoritative for existing nodes** - this allows admins to modify or delete labels.
+
+3. **Node Deleted** (`@kopf.on.delete`): ConfigMap is preserved so labels can be restored when the node is recreated.
+
+4. **Periodic Resync** (`@kopf.timer`): Every 5 minutes, a safety-net resync catches any missed events.
+
+### Authority Model
+
+| Scenario | Authority | Behavior |
+|----------|-----------|----------|
+| New/recreated node | ConfigMap | Apply stored labels to node |
+| Existing node label changed | Node | Sync change to ConfigMap |
+| Existing node label deleted | Node | Remove from ConfigMap |
+| Node deleted | - | Preserve ConfigMap for recreation |
 
 ### Edge Case Handling
 
-The controller handles several critical edge cases:
-
-- **Label Value Changes**: If a label exists on the node but has the wrong value, the controller detects this and restores the correct value from the ConfigMap.
-  
-- **Simultaneous Add/Remove**: If a label gets deleted and a new one gets added, the controller restores the deleted label (ConfigMap is authoritative) and persists the new label to the ConfigMap.
-
-- **Invalid ConfigMap Data**: If a ConfigMap contains corrupted JSON, the controller treats it as empty state and logs an error instead of crashing.
-
-- **Race Conditions**: During rolling updates or ConfigMap deletions, the controller gracefully retries operations to avoid errors when ConfigMaps are deleted between create/replace operations.
+- **Label Value Changes**: Admin changes a label value → new value persists to ConfigMap
+- **Label Deletion**: Admin removes a label → label removed from ConfigMap  
+- **Invalid ConfigMap Data**: Corrupted JSON is logged and treated as empty state
+- **Race Conditions**: ConfigMap create/replace retries handle concurrent modifications
+- **Missed Events**: Periodic resync timer catches any events missed due to network issues
 
 ## Architecture
 
 ```
-┌─────────────┐
-│   Node 1    │  persist.demo/type=expensive
-│  (worker)   │  ─────┐
-└─────────────┘       │
-                      ↓
-              ┌───────────────┐
-              │  Controller   │ ←── Polls every 5s
-              │   (Deployment)│
-              └───────────────┘
-                      ↓
-              ┌───────────────┐
-              │  ConfigMaps   │  State storage
-              │ (per node)    │
-              └───────────────┘
+┌─────────────┐     ADDED      ┌───────────────┐
+│   Node 1    │ ──────────────→│               │
+│  (worker)   │                │   Controller  │
+└─────────────┘     MODIFIED   │    (kopf)     │
+       ↑       ←──────────────→│               │
+       │                       └───────────────┘
+       │                              ↓
+  labels restored              ┌───────────────┐
+  from ConfigMap               │  ConfigMaps   │
+                               │  (per node)   │
+                               └───────────────┘
 ```
+
+**Watch Events**:
+- `ADDED` → Apply labels from ConfigMap (ConfigMap authoritative)
+- `MODIFIED` → Sync labels to ConfigMap (Node authoritative)
+- `DELETED` → Preserve ConfigMap
 
 **State Storage Example**:
 ```yaml
@@ -55,7 +66,7 @@ data:
       "labels": {
         "persist.demo/type": "expensive"
       },
-      "capturedAt": "2026-01-12T17:00:00Z"
+      "capturedAt": "2026-01-14T17:00:00Z"
     }
 ```
 
@@ -64,16 +75,19 @@ data:
 ```
 .
 ├── controller/
-│   ├── main.py           # Controller implementation
-│   ├── requirements.txt  # Python dependencies
+│   ├── main.py           # Controller implementation (kopf handlers)
+│   ├── test_main.py      # Unit tests
+│   ├── requirements.txt  # Python dependencies (kubernetes, kopf)
 │   └── Dockerfile
 ├── deploy/
 │   ├── namespace.yaml    # node-label-operator namespace
 │   ├── rbac.yaml         # ServiceAccount, ClusterRole, Bindings
-│   └── deployment.yaml   # Controller deployment
+│   ├── deployment.yaml   # Controller deployment with kopf
+├── monitoring/
+│   ├── prometheus.yaml   # Prometheus deployment
+│   └── grafana.yaml      # Grafana with dashboard
 ├── kind/
 │   └── kind-config.yaml  # Local cluster config (1 control + 2 workers)
-├── demo.py               # Automated demo script
 ├── Makefile              # Easy commands
 └── README.md
 ```
@@ -84,19 +98,14 @@ data:
 - **kubectl** (Kubernetes CLI)
 - **kind** (Kubernetes in Docker)
   ```bash
-  # Install kind
   brew install kind
-  # or
-  go install sigs.k8s.io/kind@latest
   ```
-- **Python 3.10+** with `kubernetes` package
+- **Python 3.10+** (for running tests locally)
   ```bash
-  pip install kubernetes
+  pip install kubernetes kopf
   ```
 
 ## Quick Start
-
-Run the full demo with three commands:
 
 ```bash
 # 1. Create cluster and deploy controller
@@ -107,7 +116,7 @@ make dashboard
 
 # 3. Delete a node from the dashboard or terminal
 
-# 4. Restart the kubelet to simulate a new node registration (mimics cloud provider replacing a node)
+# 4. Restart the kubelet to simulate a new node registration
 make restart-worker
 
 # 5. Bring down the cluster
@@ -122,12 +131,12 @@ Run the unit test suite:
 make test
 ```
 
-The test suite covers critical edge cases including:
-- Label value changes detection
-- Invalid JSON in ConfigMap handling
+The test suite covers:
+- Handler logic for create/update/delete events
+- Authority model (ConfigMap vs Node authoritative)
+- Label deletion detection
+- Invalid JSON handling
 - Race conditions in ConfigMap operations
-
-See [`controller/TESTING.md`](controller/TESTING.md) for detailed test documentation.
 
 ## Configuration
 
@@ -137,16 +146,22 @@ Controller behavior is configured via environment variables in `deploy/deploymen
 |----------|---------|-------------|
 | `PERSIST_LABEL_PREFIX` | `persist.demo/` | Only labels with this prefix are preserved |
 | `OPERATOR_NAMESPACE` | `node-label-operator` | Namespace for state ConfigMaps |
-| `RECONCILE_INTERVAL_SECONDS` | `5` | How often to check all nodes |
+| `RESYNC_INTERVAL_SECONDS` | `300` | Periodic resync interval (safety net) |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 
+## Why Kopf?
 
-### Why Polling Instead of Watches?
+Kopf handles the complexity of Kubernetes watchers:
 
-- **Simpler implementation**: No complex watch bookmark/resume logic
-- **Naturally handles restarts**: No need to rebuild watch state
-- **Fast enough for demo**: 5-second interval detects changes quickly
-- **Fewer edge cases**: No need to handle watch timeouts, reconnections, etc.
+| Challenge | Kopf Solution |
+|-----------|---------------|
+| Watch disconnections | Automatic reconnection |
+| Expired resourceVersion | Auto re-list and restart watch |
+| Missed events | `@kopf.timer` for periodic resync |
+| Event backpressure | Built-in workqueue with rate limiting |
+| Multiple replicas | Leader election via `--peering` |
+| Error handling | Configurable retries with exponential backoff |
+| Health checks | Built-in `/healthz` endpoint |
 
 ## Metrics
 
@@ -158,8 +173,6 @@ make grafana
 
 ## Production Considerations
 
-1. **Stable Node IDs**: Key ConfigMaps by cloud provider instance ID instead of node name (handles node renames)
-2. **Leader Election**: Run multiple replicas with leader election for HA (automatic failover)
-3. **Watches**: Use watch API for lower latency in large clusters
-4. **Alerting**: Alert if labels fail to restore after N attempts (use Prometheus AlertManager)
-5. **Prefix Configuration**: Make prefix configurable per-node or use CRDs for more control
+1. **Stable Node IDs**: Key ConfigMaps by cloud provider instance ID instead of node name
+2. **Alerting**: Alert if labels fail to restore after N attempts (Prometheus AlertManager)
+3. **Prefix Configuration**: Make prefix configurable per-node or use CRDs for more control
