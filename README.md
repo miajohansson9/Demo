@@ -6,11 +6,11 @@ A Kubernetes controller that preserves and restores node labels across node dele
 
 The controller uses Kubernetes watch events to respond to node changes in real-time:
 
-1. **Node Created** (`@kopf.on.create`): When a new node appears, the controller checks for stored labels in ConfigMap and applies them. **ConfigMap is authoritative for new/recreated nodes**.
+1. **Node Created** (`@kopf.on.create`): When a new node appears, the controller checks for stored labels in the NodeLabelState CRD and applies them. **NodeLabelState is authoritative for new/recreated nodes**.
 
-2. **Node Updated** (`@kopf.on.update`): When labels change on an existing node, the controller syncs those changes to ConfigMap. **Node is authoritative for existing nodes** - this allows admins to modify or delete labels.
+2. **Node Updated** (`@kopf.on.update`): When labels change on an existing node, the controller syncs those changes to NodeLabelState. **Node is authoritative for existing nodes** - this allows admins to modify or delete labels.
 
-3. **Node Deleted** (`@kopf.on.delete`): ConfigMap is preserved so labels can be restored when the node is recreated.
+3. **Node Deleted** (`@kopf.on.delete`): NodeLabelState is preserved so labels can be restored when the node is recreated.
 
 4. **Periodic Resync** (`@kopf.timer`): Every 5 minutes, a safety-net resync catches any missed events.
 
@@ -18,17 +18,16 @@ The controller uses Kubernetes watch events to respond to node changes in real-t
 
 | Scenario | Authority | Behavior |
 |----------|-----------|----------|
-| New/recreated node | ConfigMap | Apply stored labels to node |
-| Existing node label changed | Node | Sync change to ConfigMap |
-| Existing node label deleted | Node | Remove from ConfigMap |
-| Node deleted | - | Preserve ConfigMap for recreation |
+| New/recreated node | NodeLabelState | Apply stored labels to node |
+| Existing node label changed | Node | Sync change to NodeLabelState |
+| Existing node label deleted | Node | Remove from NodeLabelState |
+| Node deleted | - | Preserve NodeLabelState for recreation |
 
 ### Edge Case Handling
 
-- **Label Value Changes**: Admin changes a label value → new value persists to ConfigMap
-- **Label Deletion**: Admin removes a label → label removed from ConfigMap  
-- **Invalid ConfigMap Data**: Corrupted JSON is logged and treated as empty state
-- **Race Conditions**: ConfigMap create/replace retries handle concurrent modifications
+- **Label Value Changes**: Admin changes a label value → new value persists to NodeLabelState
+- **Label Deletion**: Admin removes a label → label removed from NodeLabelState  
+- **Race Conditions**: CRD create/replace retries handle concurrent modifications
 - **Missed Events**: Periodic resync timer catches any events missed due to network issues
 
 ## Architecture
@@ -42,32 +41,49 @@ The controller uses Kubernetes watch events to respond to node changes in real-t
        │                       └───────────────┘
        │                              ↓
   labels restored              ┌───────────────┐
-  from ConfigMap               │  ConfigMaps   │
-                               │  (per node)   │
+  from CRD                     │NodeLabelState │
+                               │     CRD       │
                                └───────────────┘
 ```
 
 **Watch Events**:
-- `ADDED` → Apply labels from ConfigMap (ConfigMap authoritative)
-- `MODIFIED` → Sync labels to ConfigMap (Node authoritative)
-- `DELETED` → Preserve ConfigMap
+- `ADDED` → Apply labels from NodeLabelState (CRD authoritative)
+- `MODIFIED` → Sync labels to NodeLabelState (Node authoritative)
+- `DELETED` → Preserve NodeLabelState
+
+**Why CRDs over ConfigMaps?**
+
+| Benefit | Description |
+|---------|-------------|
+| **Native kubectl UX** | `kubectl get nodelabelstates` works naturally |
+| **Watch efficiency** | Dedicated API endpoints for better scalability |
+| **Schema validation** | OpenAPI validation built-in |
+| **Better kubectl output** | Custom printer columns show node, label count, last updated |
 
 **State Storage Example**:
 ```yaml
-apiVersion: v1
-kind: ConfigMap
+apiVersion: persist.demo/v1
+kind: NodeLabelState
 metadata:
-  name: node-labels-kind-worker
-  namespace: node-label-operator
-data:
-  state.json: |
-    {
-      "nodeName": "kind-worker",
-      "labels": {
-        "persist.demo/type": "expensive"
-      },
-      "capturedAt": "2026-01-14T17:00:00Z"
-    }
+  name: nlo-demo-worker
+spec:
+  nodeName: nlo-demo-worker
+  labels:
+    persist.demo/type: expensive
+status:
+  lastUpdated: "2026-01-14T17:00:00Z"
+  labelCount: 1
+```
+
+**Viewing stored state**:
+```bash
+# List all stored label states
+kubectl get nodelabelstates
+# or shorthand
+kubectl get nls
+
+# View details for a specific node
+kubectl describe nodelabelstate nlo-demo-worker
 ```
 
 ## Project Structure
@@ -81,6 +97,7 @@ data:
 │   └── Dockerfile
 ├── deploy/
 │   ├── namespace.yaml    # node-label-operator namespace
+│   ├── crd.yaml          # NodeLabelState CRD definition
 │   ├── rbac.yaml         # ServiceAccount, ClusterRole, Bindings
 │   ├── deployment.yaml   # Controller deployment with kopf
 ├── monitoring/
@@ -111,15 +128,18 @@ data:
 # 1. Create cluster and deploy controller
 make up
 
-# 2. (Optional) Run the kubernetes dashboard
+# 2. View stored label states
+make states
+
+# 3. (Optional) Open Kubernetes Dashboard
 make dashboard
 
-# 3. Delete a node from the dashboard or terminal
+# 4. Delete a node from the dashboard or terminal
 
-# 4. Restart the kubelet to simulate a new node registration
+# 5. Restart the kubelet to simulate a new node registration
 make restart-worker
 
-# 5. Bring down the cluster
+# 6. Bring down the cluster
 make down
 ```
 
@@ -133,10 +153,9 @@ make test
 
 The test suite covers:
 - Handler logic for create/update/delete events
-- Authority model (ConfigMap vs Node authoritative)
+- Authority model (NodeLabelState vs Node authoritative)
 - Label deletion detection
-- Invalid JSON handling
-- Race conditions in ConfigMap operations
+- Race conditions in CRD operations
 
 ## Configuration
 
@@ -145,7 +164,6 @@ Controller behavior is configured via environment variables in `deploy/deploymen
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PERSIST_LABEL_PREFIX` | `persist.demo/` | Only labels with this prefix are preserved |
-| `OPERATOR_NAMESPACE` | `node-label-operator` | Namespace for state ConfigMaps |
 | `RESYNC_INTERVAL_SECONDS` | `300` | Periodic resync interval (safety net) |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 
@@ -173,6 +191,6 @@ make grafana
 
 ## Production Considerations
 
-1. **Stable Node IDs**: Key ConfigMaps by cloud provider instance ID instead of node name
+1. **Stable Node IDs**: Key NodeLabelStates by cloud provider instance ID instead of node name
 2. **Alerting**: Alert if labels fail to restore after N attempts (Prometheus AlertManager)
-3. **Prefix Configuration**: Make prefix configurable per-node or use CRDs for more control
+3. **Prefix Configuration**: Make prefix configurable per-node via annotations

@@ -5,6 +5,7 @@ help:
 	@echo "  make up             - Create kind cluster and deploy controller"
 	@echo "  make test           - Run unit tests for the controller"
 	@echo "  make logs           - Tail controller logs"
+	@echo "  make states         - View NodeLabelState resources (persisted labels)"
 	@echo "  make grafana        - Open Grafana dashboard with metrics"
 	@echo "  make dashboard      - Open Kubernetes Dashboard (web UI)"
 	@echo "  make restart-worker - Restart a worker node after deleting from UI"
@@ -26,6 +27,7 @@ up:
 	@echo ""
 	@echo "Deploying controller..."
 	kubectl apply -f deploy/namespace.yaml
+	kubectl apply -f deploy/crd.yaml
 	kubectl apply -f deploy/
 	@echo ""
 	@echo "Waiting for controller to be ready..."
@@ -130,3 +132,8 @@ grafana:
 
 logs:
 	kubectl -n node-label-operator logs -f deploy/node-label-operator
+
+states:
+	@echo "NodeLabelState resources (persisted label state):"
+	@echo ""
+	kubectl get nodelabelstates -o wide

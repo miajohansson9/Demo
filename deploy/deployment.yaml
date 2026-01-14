@@ -28,9 +28,9 @@ spec:
         # Use kopf to run the controller with leader election and health probes
         command: ["kopf", "run", "/app/main.py"]
         args:
-          - --peering=node-label-operator
           - --liveness=http://0.0.0.0:8080/healthz
           - --standalone
+          - --all-namespaces
         ports:
         - name: health
           containerPort: 8080
@@ -41,8 +41,6 @@ spec:
         env:
         - name: PERSIST_LABEL_PREFIX
           value: "persist.demo/"
-        - name: OPERATOR_NAMESPACE
-          value: "node-label-operator"
         - name: RESYNC_INTERVAL_SECONDS
           value: "300"
         - name: METRICS_PORT

@@ -3,11 +3,10 @@
 Unit tests for Node Label Operator Controller
 
 Tests critical edge cases including:
-- on_node_create: ConfigMap authoritative for new/recreated nodes
+- on_node_create: NodeLabelState authoritative for new/recreated nodes
 - on_node_update: Node authoritative for existing nodes (admin changes persist)
 - Label deletion detection
-- Invalid JSON in ConfigMap
-- Race conditions in ConfigMap operations
+- Race conditions in CRD operations
 - Resync behavior
 """
 
@@ -101,11 +100,12 @@ class TestGetOwnedLabels(unittest.TestCase):
 
 
 class TestOnNodeCreate(unittest.TestCase):
-    """Test cases for on_node_create handler - ConfigMap authoritative"""
+    """Test cases for on_node_create handler - NodeLabelState authoritative"""
 
     def setUp(self):
         """Set up test fixtures"""
         main.core_v1 = Mock()
+        main.custom_api = Mock()
         main.logger = Mock()
         main.labels_applied = Mock()
         main.labels_applied.labels = Mock(return_value=Mock())
@@ -114,10 +114,10 @@ class TestOnNodeCreate(unittest.TestCase):
         main.handler_duration = Mock()
         main.handler_duration.labels = Mock(return_value=Mock())
 
-    def test_new_node_no_configmap(self):
+    def test_new_node_no_state(self):
         """New node with no stored labels - capture any initial owned labels"""
-        with patch.object(main, 'load_configmap_state', return_value=None):
-            with patch.object(main, 'save_configmap_state') as mock_save:
+        with patch.object(main, 'load_state', return_value=None):
+            with patch.object(main, 'save_state') as mock_save:
                 with patch.object(main, 'patch_node_labels') as mock_patch:
                     main.on_node_create(
                         name="new-node",
@@ -127,9 +127,9 @@ class TestOnNodeCreate(unittest.TestCase):
                     mock_patch.assert_not_called()
 
     def test_recreated_node_applies_stored_labels(self):
-        """CRITICAL: Recreated node should get labels from ConfigMap"""
+        """CRITICAL: Recreated node should get labels from NodeLabelState"""
         stored_labels = {"persist.demo/type": "expensive", "persist.demo/zone": "us-west"}
-        with patch.object(main, 'load_configmap_state', return_value=stored_labels):
+        with patch.object(main, 'load_state', return_value=stored_labels):
             with patch.object(main, 'patch_node_labels') as mock_patch:
                 main.on_node_create(name="recreated-node", labels=None)
                 mock_patch.assert_called_once_with("recreated-node", stored_labels)
@@ -138,24 +138,24 @@ class TestOnNodeCreate(unittest.TestCase):
         """Recreated node already has some labels - only apply missing ones"""
         stored_labels = {"persist.demo/type": "expensive", "persist.demo/zone": "us-west"}
         current_labels = {"persist.demo/type": "expensive"}
-        with patch.object(main, 'load_configmap_state', return_value=stored_labels):
+        with patch.object(main, 'load_state', return_value=stored_labels):
             with patch.object(main, 'patch_node_labels') as mock_patch:
                 main.on_node_create(name="recreated-node", labels=current_labels)
                 mock_patch.assert_called_once_with("recreated-node", {"persist.demo/zone": "us-west"})
 
     def test_recreated_node_different_value(self):
-        """Recreated node has label with different value - ConfigMap wins"""
+        """Recreated node has label with different value - NodeLabelState wins"""
         stored_labels = {"persist.demo/type": "expensive"}
         current_labels = {"persist.demo/type": "cheap"}
-        with patch.object(main, 'load_configmap_state', return_value=stored_labels):
+        with patch.object(main, 'load_state', return_value=stored_labels):
             with patch.object(main, 'patch_node_labels') as mock_patch:
                 main.on_node_create(name="recreated-node", labels=current_labels)
                 mock_patch.assert_called_once_with("recreated-node", {"persist.demo/type": "expensive"})
 
     def test_new_node_no_owned_labels(self):
-        """New node with no owned labels and no ConfigMap - do nothing"""
-        with patch.object(main, 'load_configmap_state', return_value=None):
-            with patch.object(main, 'save_configmap_state') as mock_save:
+        """New node with no owned labels and no state - do nothing"""
+        with patch.object(main, 'load_state', return_value=None):
+            with patch.object(main, 'save_state') as mock_save:
                 with patch.object(main, 'patch_node_labels') as mock_patch:
                     main.on_node_create(
                         name="new-node",
@@ -171,6 +171,7 @@ class TestOnNodeUpdate(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures"""
         main.core_v1 = Mock()
+        main.custom_api = Mock()
         main.logger = Mock()
         main.labels_synced = Mock()
         main.labels_synced.labels = Mock(return_value=Mock())
@@ -180,11 +181,11 @@ class TestOnNodeUpdate(unittest.TestCase):
         main.handler_duration.labels = Mock(return_value=Mock())
 
     def test_admin_adds_label(self):
-        """CRITICAL: Admin adds a label - should persist to ConfigMap"""
+        """CRITICAL: Admin adds a label - should persist to NodeLabelState"""
         old = {"metadata": {"labels": {}}}
         new = {"metadata": {"labels": {"persist.demo/type": "expensive"}}}
-        with patch.object(main, 'save_configmap_state') as mock_save:
-            with patch.object(main, 'delete_configmap_state') as mock_delete:
+        with patch.object(main, 'save_state') as mock_save:
+            with patch.object(main, 'delete_state') as mock_delete:
                 main.on_node_update(name="test-node", old=old, new=new, diff=None)
                 mock_save.assert_called_once_with("test-node", {"persist.demo/type": "expensive"})
                 mock_delete.assert_not_called()
@@ -193,16 +194,16 @@ class TestOnNodeUpdate(unittest.TestCase):
         """CRITICAL: Admin changes label value - should persist new value"""
         old = {"metadata": {"labels": {"persist.demo/type": "expensive"}}}
         new = {"metadata": {"labels": {"persist.demo/type": "cheap"}}}
-        with patch.object(main, 'save_configmap_state') as mock_save:
+        with patch.object(main, 'save_state') as mock_save:
             main.on_node_update(name="test-node", old=old, new=new, diff=None)
             mock_save.assert_called_once_with("test-node", {"persist.demo/type": "cheap"})
 
     def test_admin_deletes_label(self):
-        """CRITICAL: Admin deletes a label - should remove from ConfigMap"""
+        """CRITICAL: Admin deletes a label - should remove from NodeLabelState"""
         old = {"metadata": {"labels": {"persist.demo/type": "expensive", "persist.demo/zone": "us-west"}}}
         new = {"metadata": {"labels": {"persist.demo/type": "expensive"}}}
-        with patch.object(main, 'save_configmap_state') as mock_save:
-            with patch.object(main, 'delete_configmap_state') as mock_delete:
+        with patch.object(main, 'save_state') as mock_save:
+            with patch.object(main, 'delete_state') as mock_delete:
                 main.on_node_update(name="test-node", old=old, new=new, diff=None)
                 mock_save.assert_called_once_with("test-node", {"persist.demo/type": "expensive"})
                 mock_delete.assert_not_called()
@@ -211,17 +212,17 @@ class TestOnNodeUpdate(unittest.TestCase):
         """CRITICAL: Admin deletes ALL owned labels - should save empty state"""
         old = {"metadata": {"labels": {"persist.demo/type": "expensive"}}}
         new = {"metadata": {"labels": {}}}
-        with patch.object(main, 'save_configmap_state') as mock_save:
+        with patch.object(main, 'save_state') as mock_save:
             main.on_node_update(name="test-node", old=old, new=new, diff=None)
-            # Save empty dict instead of deleting (preserves ConfigMap)
+            # Save empty dict instead of deleting (preserves CRD)
             mock_save.assert_called_once_with("test-node", {})
 
     def test_non_owned_label_change_ignored(self):
         """Changes to non-owned labels should be ignored"""
         old = {"metadata": {"labels": {"kubernetes.io/hostname": "old-name", "persist.demo/type": "expensive"}}}
         new = {"metadata": {"labels": {"kubernetes.io/hostname": "new-name", "persist.demo/type": "expensive"}}}
-        with patch.object(main, 'save_configmap_state') as mock_save:
-            with patch.object(main, 'delete_configmap_state') as mock_delete:
+        with patch.object(main, 'save_state') as mock_save:
+            with patch.object(main, 'delete_state') as mock_delete:
                 main.on_node_update(name="test-node", old=old, new=new, diff=None)
                 mock_save.assert_not_called()
                 mock_delete.assert_not_called()
@@ -238,7 +239,7 @@ class TestOnNodeUpdate(unittest.TestCase):
             "persist.demo/region": "east",
             "persist.demo/env": "prod"
         }}}
-        with patch.object(main, 'save_configmap_state') as mock_save:
+        with patch.object(main, 'save_state') as mock_save:
             main.on_node_update(name="test-node", old=old, new=new, diff=None)
             expected = {
                 "persist.demo/type": "cheap",
@@ -254,6 +255,7 @@ class TestResyncNode(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures"""
         main.core_v1 = Mock()
+        main.custom_api = Mock()
         main.logger = Mock()
         main.handler_errors = Mock()
         main.handler_errors.labels = Mock(return_value=Mock())
@@ -261,167 +263,150 @@ class TestResyncNode(unittest.TestCase):
         main.handler_duration.labels = Mock(return_value=Mock())
 
     def test_resync_in_sync(self):
-        """Node and ConfigMap are in sync - do nothing"""
+        """Node and NodeLabelState are in sync - do nothing"""
         labels = {"persist.demo/type": "expensive"}
-        with patch.object(main, 'load_configmap_state', return_value=labels):
-            with patch.object(main, 'save_configmap_state') as mock_save:
+        with patch.object(main, 'load_state', return_value=labels):
+            with patch.object(main, 'save_state') as mock_save:
                 main.resync_node(name="test-node", labels=labels)
                 mock_save.assert_not_called()
 
-    def test_resync_missing_configmap(self):
-        """Node has labels but ConfigMap doesn't exist - create ConfigMap"""
+    def test_resync_missing_state(self):
+        """Node has labels but NodeLabelState doesn't exist - create it"""
         labels = {"persist.demo/type": "expensive"}
-        with patch.object(main, 'load_configmap_state', return_value=None):
-            with patch.object(main, 'save_configmap_state') as mock_save:
+        with patch.object(main, 'load_state', return_value=None):
+            with patch.object(main, 'save_state') as mock_save:
                 main.resync_node(name="test-node", labels=labels)
                 mock_save.assert_called_once_with("test-node", labels)
 
     def test_resync_labels_differ(self):
-        """Node and ConfigMap have different labels - node wins"""
+        """Node and NodeLabelState have different labels - node wins"""
         node_labels = {"persist.demo/type": "cheap", "persist.demo/zone": "east"}
         stored_labels = {"persist.demo/type": "expensive"}
-        with patch.object(main, 'load_configmap_state', return_value=stored_labels):
-            with patch.object(main, 'save_configmap_state') as mock_save:
+        with patch.object(main, 'load_state', return_value=stored_labels):
+            with patch.object(main, 'save_state') as mock_save:
                 main.resync_node(name="test-node", labels=node_labels)
                 mock_save.assert_called_once_with("test-node", node_labels)
 
-    def test_resync_configmap_has_labels_node_empty(self):
-        """ConfigMap has labels but node doesn't - save empty state"""
+    def test_resync_state_has_labels_node_empty(self):
+        """NodeLabelState has labels but node doesn't - save empty state"""
         stored_labels = {"persist.demo/type": "expensive"}
-        with patch.object(main, 'load_configmap_state', return_value=stored_labels):
-            with patch.object(main, 'save_configmap_state') as mock_save:
+        with patch.object(main, 'load_state', return_value=stored_labels):
+            with patch.object(main, 'save_state') as mock_save:
                 main.resync_node(name="test-node", labels={})
-                # Save empty dict instead of deleting (preserves ConfigMap)
+                # Save empty dict instead of deleting (preserves CRD)
                 mock_save.assert_called_once_with("test-node", {})
 
 
-class TestLoadConfigMapState(unittest.TestCase):
-    """Test cases for load_configmap_state function"""
+class TestLoadState(unittest.TestCase):
+    """Test cases for load_state function"""
 
     def setUp(self):
         """Set up test fixtures"""
-        main.core_v1 = Mock()
+        main.custom_api = Mock()
         main.logger = Mock()
-        main.OPERATOR_NAMESPACE = "test-namespace"
 
-    def test_configmap_not_found(self):
-        """ConfigMap doesn't exist - return None"""
-        main.core_v1.read_namespaced_config_map.side_effect = MockApiException(status=404)
-        result = main.load_configmap_state("test-node")
+    def test_state_not_found(self):
+        """NodeLabelState doesn't exist - return None"""
+        main.custom_api.get_cluster_custom_object.side_effect = MockApiException(status=404)
+        result = main.load_state("test-node")
         self.assertIsNone(result)
 
-    def test_invalid_json_returns_none(self):
-        """Invalid JSON in ConfigMap should be handled gracefully"""
-        mock_cm = Mock()
-        mock_cm.data = {"state.json": "{ invalid json }"}
-        main.core_v1.read_namespaced_config_map.return_value = mock_cm
-        result = main.load_configmap_state("test-node")
-        self.assertIsNone(result)
-        main.logger.error.assert_called_once()
-        self.assertIn("Invalid JSON", str(main.logger.error.call_args))
-
-    def test_empty_json_returns_empty_dict(self):
-        """ConfigMap with empty JSON object"""
-        mock_cm = Mock()
-        mock_cm.data = {"state.json": "{}"}
-        main.core_v1.read_namespaced_config_map.return_value = mock_cm
-        result = main.load_configmap_state("test-node")
-        self.assertEqual(result, {})
-
-    def test_missing_state_json_key(self):
-        """ConfigMap exists but missing state.json key"""
-        mock_cm = Mock()
-        mock_cm.data = {}
-        main.core_v1.read_namespaced_config_map.return_value = mock_cm
-        result = main.load_configmap_state("test-node")
-        self.assertEqual(result, {})
-
-    def test_valid_json_returns_labels(self):
-        """Happy path: Valid ConfigMap returns labels"""
-        mock_cm = Mock()
-        mock_cm.data = {
-            "state.json": json.dumps({
-                "nodeName": "test-node",
-                "labels": {"persist.demo/type": "expensive"},
-                "capturedAt": "2026-01-13T00:00:00Z"
-            })
+    def test_empty_state_returns_empty_dict(self):
+        """NodeLabelState with empty labels"""
+        main.custom_api.get_cluster_custom_object.return_value = {
+            "spec": {"nodeName": "test-node", "labels": {}}
         }
-        main.core_v1.read_namespaced_config_map.return_value = mock_cm
-        result = main.load_configmap_state("test-node")
+        result = main.load_state("test-node")
+        self.assertEqual(result, {})
+
+    def test_missing_spec_returns_empty(self):
+        """NodeLabelState exists but missing spec"""
+        main.custom_api.get_cluster_custom_object.return_value = {}
+        result = main.load_state("test-node")
+        self.assertEqual(result, {})
+
+    def test_valid_state_returns_labels(self):
+        """Happy path: Valid NodeLabelState returns labels"""
+        main.custom_api.get_cluster_custom_object.return_value = {
+            "spec": {
+                "nodeName": "test-node",
+                "labels": {"persist.demo/type": "expensive"}
+            }
+        }
+        result = main.load_state("test-node")
         self.assertEqual(result, {"persist.demo/type": "expensive"})
 
     def test_api_error_propagates(self):
         """Non-404 API errors should propagate"""
-        main.core_v1.read_namespaced_config_map.side_effect = MockApiException(status=500)
+        main.custom_api.get_cluster_custom_object.side_effect = MockApiException(status=500)
         with self.assertRaises(MockApiException):
-            main.load_configmap_state("test-node")
+            main.load_state("test-node")
 
 
-class TestSaveConfigMapState(unittest.TestCase):
-    """Test cases for save_configmap_state function"""
+class TestSaveState(unittest.TestCase):
+    """Test cases for save_state function"""
 
     def setUp(self):
         """Set up test fixtures"""
-        main.core_v1 = Mock()
+        main.custom_api = Mock()
         main.logger = Mock()
-        main.OPERATOR_NAMESPACE = "test-namespace"
-        main.client = MagicMock()
 
     def test_race_condition_create_409_then_404(self):
         """Race condition: 409 on create, 404 on replace, retry create"""
         create_409 = MockApiException(status=409)
         replace_404 = MockApiException(status=404)
-        main.core_v1.create_namespaced_config_map.side_effect = [create_409, None]
-        main.core_v1.replace_namespaced_config_map.side_effect = replace_404
-        main.save_configmap_state("test-node", {"persist.demo/type": "expensive"})
-        self.assertEqual(main.core_v1.create_namespaced_config_map.call_count, 2)
-        main.core_v1.replace_namespaced_config_map.assert_called_once()
+        main.custom_api.create_cluster_custom_object.side_effect = [create_409, None]
+        main.custom_api.get_cluster_custom_object.return_value = {"metadata": {"resourceVersion": "123"}}
+        main.custom_api.replace_cluster_custom_object.side_effect = replace_404
+        main.save_state("test-node", {"persist.demo/type": "expensive"})
+        self.assertEqual(main.custom_api.create_cluster_custom_object.call_count, 2)
+        main.custom_api.replace_cluster_custom_object.assert_called_once()
         main.logger.warning.assert_called_once()
         self.assertIn("deleted during update", str(main.logger.warning.call_args))
 
     def test_normal_create_flow(self):
-        """Happy path: Create new ConfigMap"""
-        main.core_v1.create_namespaced_config_map.return_value = None
-        main.save_configmap_state("test-node", {"persist.demo/type": "expensive"})
-        main.core_v1.create_namespaced_config_map.assert_called_once()
-        main.logger.info.assert_called_with("Created ConfigMap for test-node")
+        """Happy path: Create new NodeLabelState"""
+        main.custom_api.create_cluster_custom_object.return_value = None
+        main.save_state("test-node", {"persist.demo/type": "expensive"})
+        main.custom_api.create_cluster_custom_object.assert_called_once()
+        main.logger.info.assert_called_with("Created NodeLabelState for test-node")
 
     def test_normal_update_flow(self):
-        """Happy path: Update existing ConfigMap"""
+        """Happy path: Update existing NodeLabelState"""
         create_409 = MockApiException(status=409)
-        main.core_v1.create_namespaced_config_map.side_effect = create_409
-        main.core_v1.replace_namespaced_config_map.return_value = None
-        main.save_configmap_state("test-node", {"persist.demo/type": "expensive"})
-        main.core_v1.replace_namespaced_config_map.assert_called_once()
-        main.logger.debug.assert_called_with("Updated ConfigMap for test-node")
+        main.custom_api.create_cluster_custom_object.side_effect = create_409
+        main.custom_api.get_cluster_custom_object.return_value = {"metadata": {"resourceVersion": "123"}}
+        main.custom_api.replace_cluster_custom_object.return_value = None
+        main.save_state("test-node", {"persist.demo/type": "expensive"})
+        main.custom_api.replace_cluster_custom_object.assert_called_once()
+        main.logger.debug.assert_called_with("Updated NodeLabelState for test-node")
 
 
-class TestDeleteConfigMapState(unittest.TestCase):
-    """Test cases for delete_configmap_state function"""
+class TestDeleteState(unittest.TestCase):
+    """Test cases for delete_state function"""
 
     def setUp(self):
         """Set up test fixtures"""
-        main.core_v1 = Mock()
+        main.custom_api = Mock()
         main.logger = Mock()
-        main.OPERATOR_NAMESPACE = "test-namespace"
 
     def test_delete_success(self):
-        """Happy path: Delete ConfigMap"""
-        main.core_v1.delete_namespaced_config_map.return_value = None
-        main.delete_configmap_state("test-node")
-        main.core_v1.delete_namespaced_config_map.assert_called_once()
-        main.logger.info.assert_called_with("Deleted ConfigMap for test-node")
+        """Happy path: Delete NodeLabelState"""
+        main.custom_api.delete_cluster_custom_object.return_value = None
+        main.delete_state("test-node")
+        main.custom_api.delete_cluster_custom_object.assert_called_once()
+        main.logger.info.assert_called_with("Deleted NodeLabelState for test-node")
 
     def test_delete_not_found_ignored(self):
-        """ConfigMap already deleted - should not raise"""
-        main.core_v1.delete_namespaced_config_map.side_effect = MockApiException(status=404)
-        main.delete_configmap_state("test-node")
+        """NodeLabelState already deleted - should not raise"""
+        main.custom_api.delete_cluster_custom_object.side_effect = MockApiException(status=404)
+        main.delete_state("test-node")
 
     def test_delete_error_propagates(self):
         """Non-404 errors should propagate"""
-        main.core_v1.delete_namespaced_config_map.side_effect = MockApiException(status=500)
+        main.custom_api.delete_cluster_custom_object.side_effect = MockApiException(status=500)
         with self.assertRaises(MockApiException):
-            main.delete_configmap_state("test-node")
+            main.delete_state("test-node")
 
 
 class TestAuthorityModelIntegration(unittest.TestCase):
@@ -430,6 +415,7 @@ class TestAuthorityModelIntegration(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures"""
         main.core_v1 = Mock()
+        main.custom_api = Mock()
         main.logger = Mock()
         main.labels_applied = Mock()
         main.labels_applied.labels = Mock(return_value=Mock())
@@ -443,8 +429,8 @@ class TestAuthorityModelIntegration(unittest.TestCase):
     def test_full_node_lifecycle(self):
         """Test complete node lifecycle: create, update, delete, recreate"""
         # Step 1: New node with initial labels
-        with patch.object(main, 'load_configmap_state', return_value=None):
-            with patch.object(main, 'save_configmap_state') as mock_save:
+        with patch.object(main, 'load_state', return_value=None):
+            with patch.object(main, 'save_state') as mock_save:
                 main.on_node_create(
                     name="lifecycle-node",
                     labels={"persist.demo/type": "expensive"}
@@ -452,7 +438,7 @@ class TestAuthorityModelIntegration(unittest.TestCase):
                 mock_save.assert_called_once_with("lifecycle-node", {"persist.demo/type": "expensive"})
 
         # Step 2: Admin changes the label
-        with patch.object(main, 'save_configmap_state') as mock_save:
+        with patch.object(main, 'save_state') as mock_save:
             main.on_node_update(
                 name="lifecycle-node",
                 old={"metadata": {"labels": {"persist.demo/type": "expensive"}}},
@@ -461,11 +447,11 @@ class TestAuthorityModelIntegration(unittest.TestCase):
             )
             mock_save.assert_called_once_with("lifecycle-node", {"persist.demo/type": "cheap"})
 
-        # Step 3: Node deleted (ConfigMap preserved)
+        # Step 3: Node deleted (NodeLabelState preserved)
         main.on_node_delete(name="lifecycle-node")
 
-        # Step 4: Node recreated - should get labels from ConfigMap
-        with patch.object(main, 'load_configmap_state', return_value={"persist.demo/type": "cheap"}):
+        # Step 4: Node recreated - should get labels from NodeLabelState
+        with patch.object(main, 'load_state', return_value={"persist.demo/type": "cheap"}):
             with patch.object(main, 'patch_node_labels') as mock_patch:
                 main.on_node_create(name="lifecycle-node", labels=None)
                 mock_patch.assert_called_once_with("lifecycle-node", {"persist.demo/type": "cheap"})

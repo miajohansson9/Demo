@@ -9,9 +9,21 @@ kind: ClusterRole
 metadata:
   name: node-label-operator
 rules:
+# Node access for watching and patching labels
 - apiGroups: [""]
   resources: ["nodes"]
   verbs: ["get", "list", "watch", "patch"]
+# NodeLabelState CRD access for persisting label state
+- apiGroups: ["persist.demo"]
+  resources: ["nodelabelstates"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["persist.demo"]
+  resources: ["nodelabelstates/status"]
+  verbs: ["get", "update", "patch"]
+# CRD list permission for kopf's auto-discovery
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourcedefinitions"]
+  verbs: ["list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -26,6 +38,7 @@ subjects:
   name: node-label-operator
   namespace: node-label-operator
 ---
+# Keep ConfigMap access for kopf peering/coordination
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

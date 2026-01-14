@@ -6,8 +6,8 @@ A Kubernetes controller that preserves and restores node labels
 across node deletion/recreation events using kopf framework.
 
 Authority Model:
-- New nodes (on_create): ConfigMap is authoritative - apply stored labels
-- Existing nodes (on_update): Node is authoritative - sync changes to ConfigMap
+- New nodes (on_create): NodeLabelState CRD is authoritative - apply stored labels
+- Existing nodes (on_update): Node is authoritative - sync changes to NodeLabelState
 """
 
 import json
@@ -24,10 +24,14 @@ from prometheus_client import Counter, Histogram, Gauge, start_http_server
 
 # Configuration from environment
 PERSIST_LABEL_PREFIX = os.getenv("PERSIST_LABEL_PREFIX", "persist.demo/")
-OPERATOR_NAMESPACE = os.getenv("OPERATOR_NAMESPACE", "node-label-operator")
 RESYNC_INTERVAL_SECONDS = int(os.getenv("RESYNC_INTERVAL_SECONDS", "300"))
 METRICS_PORT = int(os.getenv("METRICS_PORT", "9090"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# CRD constants
+CRD_GROUP = "persist.demo"
+CRD_VERSION = "v1"
+CRD_PLURAL = "nodelabelstates"
 
 # Configure logging
 logging.basicConfig(
@@ -37,18 +41,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global API client (initialized on startup)
+# Global API clients (initialized on startup)
 core_v1: Optional[client.CoreV1Api] = None
+custom_api: Optional[client.CustomObjectsApi] = None
 
 # Prometheus metrics
 labels_applied = Counter(
     'node_label_labels_applied_total',
-    'Total number of labels applied to nodes from ConfigMap',
+    'Total number of labels applied to nodes from storage',
     ['node']
 )
 labels_synced = Counter(
     'node_label_labels_synced_total',
-    'Total number of label changes synced to ConfigMap',
+    'Total number of label changes synced to storage',
     ['node', 'action']  # action: added, removed, changed
 )
 handler_errors = Counter(
@@ -67,9 +72,9 @@ nodes_tracked = Gauge(
 )
 
 
-def configmap_name(node_name: str) -> str:
-    """Generate ConfigMap name for a given node."""
-    return f"node-labels-{node_name}"
+def crd_name(node_name: str) -> str:
+    """Generate NodeLabelState resource name for a given node."""
+    return node_name  # Use node name directly for natural kubectl UX
 
 
 def get_owned_labels(labels: Optional[Dict[str, str]]) -> Dict[str, str]:
@@ -79,93 +84,134 @@ def get_owned_labels(labels: Optional[Dict[str, str]]) -> Dict[str, str]:
     return {k: v for k, v in labels.items() if k.startswith(PERSIST_LABEL_PREFIX)}
 
 
-def load_configmap_state(node_name: str) -> Optional[Dict[str, str]]:
+def load_state(node_name: str) -> Optional[Dict[str, str]]:
     """
-    Load persisted label state from ConfigMap.
+    Load persisted label state from NodeLabelState CRD.
     
     Returns:
-        dict: Persisted labels, or None if ConfigMap doesn't exist or contains invalid data
+        dict: Persisted labels, or None if NodeLabelState doesn't exist
     """
     try:
-        cm = core_v1.read_namespaced_config_map(
-            name=configmap_name(node_name),
-            namespace=OPERATOR_NAMESPACE
+        obj = custom_api.get_cluster_custom_object(
+            group=CRD_GROUP,
+            version=CRD_VERSION,
+            plural=CRD_PLURAL,
+            name=crd_name(node_name)
         )
-        state_json = cm.data.get("state.json", "{}")
-        try:
-            state = json.loads(state_json)
-            return state.get("labels", {})
-        except json.JSONDecodeError as json_err:
-            logger.error(f"Invalid JSON in ConfigMap for {node_name}: {json_err}. Treating as empty state.")
-            return None
+        return obj.get("spec", {}).get("labels", {})
     except ApiException as e:
         if e.status == 404:
             return None
-        logger.error(f"Error reading ConfigMap for {node_name}: {e}")
+        logger.error(f"Error reading NodeLabelState for {node_name}: {e}")
         raise
 
 
-def save_configmap_state(node_name: str, labels: Dict[str, str]):
+def save_state(node_name: str, labels: Dict[str, str]):
     """
-    Save label state to ConfigMap.
+    Save label state to NodeLabelState CRD.
     
-    Creates ConfigMap if it doesn't exist, updates if it does.
-    Handles race condition when ConfigMap is deleted between the 409 check and replace.
+    Creates CRD if it doesn't exist, updates if it does.
+    Also updates the status subresource.
     """
-    state = {
-        "nodeName": node_name,
-        "labels": labels,
-        "capturedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    
+    body = {
+        "apiVersion": f"{CRD_GROUP}/{CRD_VERSION}",
+        "kind": "NodeLabelState",
+        "metadata": {
+            "name": crd_name(node_name)
+        },
+        "spec": {
+            "nodeName": node_name,
+            "labels": labels
+        }
     }
     
-    cm = client.V1ConfigMap(
-        metadata=client.V1ObjectMeta(name=configmap_name(node_name)),
-        data={"state.json": json.dumps(state, indent=2)}
-    )
-    
     try:
-        core_v1.create_namespaced_config_map(
-            namespace=OPERATOR_NAMESPACE,
-            body=cm
+        # Try to create first
+        custom_api.create_cluster_custom_object(
+            group=CRD_GROUP,
+            version=CRD_VERSION,
+            plural=CRD_PLURAL,
+            body=body
         )
-        logger.info(f"Created ConfigMap for {node_name}")
+        logger.info(f"Created NodeLabelState for {node_name}")
+        _update_status(node_name, labels, now)
     except ApiException as e:
         if e.status == 409:  # Already exists
             try:
-                core_v1.replace_namespaced_config_map(
-                    name=configmap_name(node_name),
-                    namespace=OPERATOR_NAMESPACE,
-                    body=cm
+                # Get current to preserve resourceVersion
+                current = custom_api.get_cluster_custom_object(
+                    group=CRD_GROUP,
+                    version=CRD_VERSION,
+                    plural=CRD_PLURAL,
+                    name=crd_name(node_name)
                 )
-                logger.debug(f"Updated ConfigMap for {node_name}")
+                body["metadata"]["resourceVersion"] = current["metadata"]["resourceVersion"]
+                
+                custom_api.replace_cluster_custom_object(
+                    group=CRD_GROUP,
+                    version=CRD_VERSION,
+                    plural=CRD_PLURAL,
+                    name=crd_name(node_name),
+                    body=body
+                )
+                logger.debug(f"Updated NodeLabelState for {node_name}")
+                _update_status(node_name, labels, now)
             except ApiException as replace_err:
                 if replace_err.status == 404:
-                    # ConfigMap was deleted between 409 and replace - retry create
-                    logger.warning(f"ConfigMap deleted during update, recreating for {node_name}")
-                    core_v1.create_namespaced_config_map(
-                        namespace=OPERATOR_NAMESPACE,
-                        body=cm
+                    # Resource was deleted between 409 and replace - retry create
+                    logger.warning(f"NodeLabelState deleted during update, recreating for {node_name}")
+                    custom_api.create_cluster_custom_object(
+                        group=CRD_GROUP,
+                        version=CRD_VERSION,
+                        plural=CRD_PLURAL,
+                        body=body
                     )
-                    logger.info(f"Created ConfigMap for {node_name} (retry)")
+                    logger.info(f"Created NodeLabelState for {node_name} (retry)")
+                    _update_status(node_name, labels, now)
                 else:
-                    logger.error(f"Error replacing ConfigMap for {node_name}: {replace_err}")
+                    logger.error(f"Error replacing NodeLabelState for {node_name}: {replace_err}")
                     raise
         else:
-            logger.error(f"Error saving ConfigMap for {node_name}: {e}")
+            logger.error(f"Error saving NodeLabelState for {node_name}: {e}")
             raise
 
 
-def delete_configmap_state(node_name: str):
-    """Delete ConfigMap for a node (optional cleanup)."""
+def _update_status(node_name: str, labels: Dict[str, str], timestamp: str):
+    """Update the status subresource of a NodeLabelState."""
     try:
-        core_v1.delete_namespaced_config_map(
-            name=configmap_name(node_name),
-            namespace=OPERATOR_NAMESPACE
+        status_body = {
+            "status": {
+                "lastUpdated": timestamp,
+                "labelCount": len(labels)
+            }
+        }
+        custom_api.patch_cluster_custom_object_status(
+            group=CRD_GROUP,
+            version=CRD_VERSION,
+            plural=CRD_PLURAL,
+            name=crd_name(node_name),
+            body=status_body
         )
-        logger.info(f"Deleted ConfigMap for {node_name}")
+    except ApiException as e:
+        # Status update failure is not critical
+        logger.warning(f"Failed to update status for {node_name}: {e}")
+
+
+def delete_state(node_name: str):
+    """Delete NodeLabelState for a node (optional cleanup)."""
+    try:
+        custom_api.delete_cluster_custom_object(
+            group=CRD_GROUP,
+            version=CRD_VERSION,
+            plural=CRD_PLURAL,
+            name=crd_name(node_name)
+        )
+        logger.info(f"Deleted NodeLabelState for {node_name}")
     except ApiException as e:
         if e.status != 404:
-            logger.error(f"Error deleting ConfigMap for {node_name}: {e}")
+            logger.error(f"Error deleting NodeLabelState for {node_name}: {e}")
             raise
 
 
@@ -189,7 +235,7 @@ def patch_node_labels(node_name: str, labels: Dict[str, str]):
 @kopf.on.startup()
 def on_startup(settings: kopf.OperatorSettings, **kwargs):
     """Initialize the controller on startup."""
-    global core_v1
+    global core_v1, custom_api
     
     # Load Kubernetes config
     try:
@@ -202,8 +248,9 @@ def on_startup(settings: kopf.OperatorSettings, **kwargs):
         except config.ConfigException:
             raise kopf.PermanentError("Could not load Kubernetes config")
     
-    # Initialize API client
+    # Initialize API clients
     core_v1 = client.CoreV1Api()
+    custom_api = client.CustomObjectsApi()
     
     # Start Prometheus metrics server (on different port than kopf's health)
     start_http_server(METRICS_PORT)
@@ -216,7 +263,7 @@ def on_startup(settings: kopf.OperatorSettings, **kwargs):
     
     logger.info("Node Label Operator started")
     logger.info(f"  Label prefix: {PERSIST_LABEL_PREFIX}")
-    logger.info(f"  Namespace: {OPERATOR_NAMESPACE}")
+    logger.info(f"  Storage: NodeLabelState CRD ({CRD_GROUP}/{CRD_VERSION})")
     logger.info(f"  Resync interval: {RESYNC_INTERVAL_SECONDS}s")
 
 
@@ -225,19 +272,19 @@ def on_node_create(name: str, labels: Optional[Dict[str, str]], **kwargs):
     """
     Handle new node creation.
     
-    ConfigMap is authoritative: Apply stored labels to the new/recreated node.
+    NodeLabelState is authoritative: Apply stored labels to the new/recreated node.
     This handles the case where a node was deleted and recreated with the same name.
     """
     start_time = time.time()
     try:
-        stored_labels = load_configmap_state(name)
+        stored_labels = load_state(name)
         
-        if not stored_labels:
-            # No stored labels - this is a truly new node
+        if stored_labels is None:
+            # No stored state - this is a truly new node
             # Capture any owned labels it might have
             owned = get_owned_labels(labels)
             if owned:
-                save_configmap_state(name, owned)
+                save_state(name, owned)
                 logger.info(f"New node {name}: captured {len(owned)} initial labels")
             else:
                 logger.debug(f"New node {name}: no owned labels to capture")
@@ -247,20 +294,20 @@ def on_node_create(name: str, labels: Optional[Dict[str, str]], **kwargs):
         owned_stored = get_owned_labels(stored_labels)
         
         if not owned_stored:
-            logger.debug(f"New node {name}: ConfigMap exists but no owned labels")
+            logger.debug(f"New node {name}: NodeLabelState exists but no owned labels")
             return
         
         # Check what labels the node currently has
         current_owned = get_owned_labels(labels)
         
-        # Find labels to apply (in ConfigMap but not on node)
+        # Find labels to apply (in storage but not on node)
         labels_to_apply = {k: v for k, v in owned_stored.items() 
                           if k not in current_owned or current_owned[k] != v}
         
         if labels_to_apply:
             patch_node_labels(name, labels_to_apply)
             labels_applied.labels(node=name).inc(len(labels_to_apply))
-            logger.info(f"Node {name} created: applied {len(labels_to_apply)} labels from ConfigMap")
+            logger.info(f"Node {name} created: applied {len(labels_to_apply)} labels from NodeLabelState")
         else:
             logger.debug(f"Node {name} created: all labels already present")
             
@@ -278,7 +325,7 @@ def on_node_update(name: str, old: Dict, new: Dict, diff: object, **kwargs):
     """
     Handle node updates.
     
-    Node is authoritative: Sync label changes to ConfigMap.
+    Node is authoritative: Sync label changes to NodeLabelState.
     This allows admins to modify/delete labels and have changes persist.
     """
     start_time = time.time()
@@ -301,9 +348,9 @@ def on_node_update(name: str, old: Dict, new: Dict, diff: object, **kwargs):
         removed = set(old_owned.keys()) - set(new_owned.keys())
         changed = {k for k in old_owned if k in new_owned and old_owned[k] != new_owned[k]}
         
-        # Node is authoritative - persist current state to ConfigMap
-        # Save even if empty (preserves ConfigMap for future extensibility)
-        save_configmap_state(name, new_owned)
+        # Node is authoritative - persist current state to NodeLabelState
+        # Save even if empty (preserves CRD for future extensibility)
+        save_state(name, new_owned)
         
         # Update metrics
         if added:
@@ -313,7 +360,7 @@ def on_node_update(name: str, old: Dict, new: Dict, diff: object, **kwargs):
         if changed:
             labels_synced.labels(node=name, action='changed').inc(len(changed))
         
-        logger.info(f"Node {name} labels synced to ConfigMap: "
+        logger.info(f"Node {name} labels synced to NodeLabelState: "
                    f"+{len(added)} added, -{len(removed)} removed, ~{len(changed)} changed")
         
     except ApiException as e:
@@ -330,15 +377,15 @@ def on_node_delete(name: str, **kwargs):
     """
     Handle node deletion.
     
-    Preserve ConfigMap for potential node recreation.
+    Preserve NodeLabelState for potential node recreation.
     This allows labels to be restored when the node comes back.
     """
     start_time = time.time()
     try:
-        # Intentionally preserve ConfigMap for recreation scenario
-        logger.info(f"Node {name} deleted, preserving ConfigMap for potential recreation")
+        # Intentionally preserve NodeLabelState for recreation scenario
+        logger.info(f"Node {name} deleted, preserving NodeLabelState for potential recreation")
         
-        # Note: If you want to cleanup ConfigMaps for permanently removed nodes,
+        # Note: If you want to cleanup stale NodeLabelStates for permanently removed nodes,
         # you could add a TTL or separate cleanup mechanism
         
     finally:
@@ -356,17 +403,17 @@ def resync_node(name: str, labels: Optional[Dict[str, str]], **kwargs):
     start_time = time.time()
     try:
         owned_labels = get_owned_labels(labels)
-        stored_labels = load_configmap_state(name) or {}
+        stored_labels = load_state(name) or {}
         stored_owned = get_owned_labels(stored_labels)
         
-        # If node has labels but ConfigMap doesn't match, sync to ConfigMap
+        # If node has labels but storage doesn't match, sync to storage
         # (node is authoritative for existing nodes)
         if owned_labels != stored_owned:
-            save_configmap_state(name, owned_labels)
+            save_state(name, owned_labels)
             if owned_labels:
-                logger.info(f"Resync {name}: synced {len(owned_labels)} labels to ConfigMap")
+                logger.info(f"Resync {name}: synced {len(owned_labels)} labels to NodeLabelState")
             else:
-                logger.info(f"Resync {name}: cleared labels in ConfigMap (admin removed them)")
+                logger.info(f"Resync {name}: cleared labels in NodeLabelState (admin removed them)")
         else:
             logger.debug(f"Resync {name}: in sync")
             
