@@ -94,9 +94,7 @@ restart-worker:
 	echo "" && echo "Waiting for node to register..." && \
 	sleep 2 && \
 	echo "" && echo "=== Labels on $$NODE" && \
-	kubectl get node $$NODE --show-labels | grep -o "persist.demo/[^,]*" || echo "No persist.demo labels found (expected after fresh registration)" && \
-	echo "" && echo "Waiting for controller to restore labels (5 more seconds)..." && \
-	sleep 10 && \
+	kubectl get node $$NODE --show-labels | grep -o "persist.demo/[^,]*" || echo "No persist.demo labels found" && \
 	echo "" && echo "=== Labels on $$NODE (after controller restoration) ===" && \
 	kubectl get node $$NODE --show-labels | grep -o "persist.demo/[^,]*" && \
 	echo "" && echo "✓ Label restored!" && \
