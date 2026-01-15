@@ -8,11 +8,9 @@ The controller uses Kubernetes watch events to respond to node changes in real-t
 
 1. **Node Created** (`@kopf.on.create`): When a new node appears, the controller checks for stored labels in the NodeLabelState CRD and applies them. **NodeLabelState is authoritative for new/recreated nodes**.
 
-2. **Node Updated** (`@kopf.on.update`): When labels change on an existing node, the controller syncs those changes to NodeLabelState. **Node is authoritative for existing nodes** - this allows admins to modify or delete labels.
+2. **Labels Changed** (`@kopf.on.field`): When labels change on an existing node, the controller syncs those changes to NodeLabelState. **Node is authoritative for existing nodes** - this allows admins to modify or delete labels.
 
-3. **Node Deleted** (`@kopf.on.delete`): NodeLabelState is preserved so labels can be restored when the node is recreated.
-
-4. **Periodic Resync** (`@kopf.timer`): Every 5 minutes, a safety-net resync catches any missed events.
+3. **Node Deleted**: NodeLabelState CRD stays unchangedd so labels can be restored when a node with the same name is recreated.
 
 ### Authority Model
 
@@ -27,8 +25,8 @@ The controller uses Kubernetes watch events to respond to node changes in real-t
 
 - **Label Value Changes**: Admin changes a label value → new value persists to NodeLabelState
 - **Label Deletion**: Admin removes a label → label removed from NodeLabelState  
-- **Race Conditions**: CRD create/replace retries handle concurrent modifications
-- **Missed Events**: Periodic resync timer catches any events missed due to network issues
+- **Empty Labels**: When all labels are removed, CRD is updated with empty labels (not deleted)
+- **CRD Creation**: First label added creates the CRD; subsequent changes update it
 
 ## Architecture
 
@@ -164,7 +162,7 @@ Controller behavior is configured via environment variables in `deploy/deploymen
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PERSIST_LABEL_PREFIX` | `persist.demo/` | Only labels with this prefix are preserved |
-| `RESYNC_INTERVAL_SECONDS` | `300` | Periodic resync interval (safety net) |
+| `METRICS_PORT` | `9090` | Port for Prometheus metrics endpoint |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 
 ## Why Kopf?
@@ -175,13 +173,22 @@ Kopf handles the complexity of Kubernetes watchers:
 |-----------|---------------|
 | Watch disconnections | Automatic reconnection |
 | Expired resourceVersion | Auto re-list and restart watch |
-| Missed events | `@kopf.timer` for periodic resync |
+| Missed events | Startup reconciliation re-lists all resources |
 | Event backpressure | Built-in workqueue with rate limiting |
 | Multiple replicas | Leader election via `--peering` |
 | Error handling | Configurable retries with exponential backoff |
 | Health checks | Built-in `/healthz` endpoint |
 
 ## Metrics
+
+The controller exposes Prometheus metrics on port 9090:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `node_labels_applied_total` | Counter | Labels applied from storage to nodes (by node) |
+| `node_labels_synced_total` | Counter | Labels synced to storage (by node, action) |
+| `node_handler_errors_total` | Counter | Handler errors (by handler) |
+| `node_handler_duration_seconds` | Histogram | Handler execution duration (by handler) |
 
 **View metrics:**
 ```bash

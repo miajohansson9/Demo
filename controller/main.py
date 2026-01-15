@@ -10,7 +10,6 @@ Authority Model:
 - Existing nodes (on_update): Node is authoritative - sync changes to NodeLabelState
 """
 
-import json
 import logging
 import os
 import time
@@ -206,7 +205,7 @@ def on_node_create(name: str, labels: Optional[Dict[str, str]], **kwargs):
         
         # Check if CRD exists and has labels to restore
         if stored_owned is None or not stored_owned:
-            # No CRD or no stored labels to restore
+            # No CRD or no stored labels to restore (assumption is that nodes do not have labels when created)
             return
         
         # Apply all stored labels (node shouldn't have any of our labels yet)
