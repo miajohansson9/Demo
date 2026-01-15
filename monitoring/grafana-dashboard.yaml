@@ -30,42 +30,13 @@ data:
       },
       "panels": [
           {
-            "id": 2,
-            "title": "Nodes Monitored",
+            "id": 3,
+            "title": "Total Labels Applied",
             "type": "stat",
             "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
             "targets": [
               {
-                "expr": "node_label_nodes_monitored",
-                "refId": "A"
-              }
-            ],
-            "options": {
-              "graphMode": "area",
-              "colorMode": "value"
-            },
-            "fieldConfig": {
-              "defaults": {
-                "color": {"mode": "thresholds"},
-                "thresholds": {
-                  "mode": "absolute",
-                  "steps": [
-                    {"color": "red", "value": null},
-                    {"color": "yellow", "value": 1},
-                    {"color": "green", "value": 2}
-                  ]
-                }
-              }
-            }
-          },
-          {
-            "id": 3,
-            "title": "Total Labels Restored",
-            "type": "stat",
-            "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
-            "targets": [
-              {
-                "expr": "sum(node_label_labels_restored_total)",
+                "expr": "sum(node_labels_applied_total)",
                 "refId": "A"
               }
             ],
@@ -87,12 +58,12 @@ data:
           },
           {
             "id": 4,
-            "title": "Reconciliations / min",
+            "title": "Handler Executions / min",
             "type": "stat",
-            "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+            "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
             "targets": [
               {
-                "expr": "60 * sum(rate(node_label_reconciliation_duration_seconds_count[1m]))",
+                "expr": "60 * sum(rate(node_handler_duration_seconds_count[1m]))",
                 "refId": "A"
               }
             ],
@@ -116,12 +87,12 @@ data:
           },
           {
             "id": 5,
-            "title": "Errors",
+            "title": "Handler Errors",
             "type": "stat",
-            "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+            "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
             "targets": [
               {
-                "expr": "node_label_reconciliation_errors_total",
+                "expr": "sum(node_handler_errors_total)",
                 "refId": "A"
               }
             ],
@@ -144,19 +115,51 @@ data:
           },
           {
             "id": 6,
-            "title": "🏷️ Labels Restored (by Node & Label)",
-            "description": "Cumulative count - line steps up when labels are restored",
+            "title": "🏷️ Labels Applied (by Node)",
+            "description": "Cumulative count of labels applied from storage to nodes",
             "type": "graph",
-            "gridPos": {"h": 8, "w": 24, "x": 0, "y": 4},
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
             "targets": [
               {
-                "expr": "node_label_labels_restored_total",
-                "legendFormat": "{{node}}: {{label_key}}={{label_value}}",
+                "expr": "node_labels_applied_total",
+                "legendFormat": "{{node}}",
                 "refId": "A"
               }
             ],
             "yaxes": [
-              {"format": "short", "label": "Total Restores", "min": 0, "decimals": 0},
+              {"format": "short", "label": "Total Applied", "min": 0, "decimals": 0},
+              {"format": "short"}
+            ],
+            "lines": true,
+            "linewidth": 2,
+            "fill": 1,
+            "steppedLine": true
+          },
+          {
+            "id": 8,
+            "title": "🔄 Labels Synced to Storage",
+            "description": "Label changes synced to NodeLabelState CRD",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+            "targets": [
+              {
+                "expr": "node_labels_synced_total{action=\"added\"}",
+                "legendFormat": "{{node}} - added",
+                "refId": "A"
+              },
+              {
+                "expr": "node_labels_synced_total{action=\"removed\"}",
+                "legendFormat": "{{node}} - removed",
+                "refId": "B"
+              },
+              {
+                "expr": "node_labels_synced_total{action=\"changed\"}",
+                "legendFormat": "{{node}} - changed",
+                "refId": "C"
+              }
+            ],
+            "yaxes": [
+              {"format": "short", "label": "Total Synced", "min": 0, "decimals": 0},
               {"format": "short"}
             ],
             "lines": true,
@@ -166,28 +169,28 @@ data:
           },
           {
             "id": 7,
-            "title": "⏱️ Reconciliation Duration (p50 / p95 / p99)",
+            "title": "⏱️ Handler Duration (p50 / p95 / p99)",
             "type": "graph",
             "gridPos": {"h": 6, "w": 24, "x": 0, "y": 12},
             "targets": [
               {
-                "expr": "histogram_quantile(0.50, rate(node_label_reconciliation_duration_seconds_bucket[1m]))",
-                "legendFormat": "p50",
+                "expr": "histogram_quantile(0.50, sum(rate(node_handler_duration_seconds_bucket[1m])) by (le, handler))",
+                "legendFormat": "{{handler}} - p50",
                 "refId": "A"
               },
               {
-                "expr": "histogram_quantile(0.95, rate(node_label_reconciliation_duration_seconds_bucket[1m]))",
-                "legendFormat": "p95",
+                "expr": "histogram_quantile(0.95, sum(rate(node_handler_duration_seconds_bucket[1m])) by (le, handler))",
+                "legendFormat": "{{handler}} - p95",
                 "refId": "B"
               },
               {
-                "expr": "histogram_quantile(0.99, rate(node_label_reconciliation_duration_seconds_bucket[1m]))",
-                "legendFormat": "p99",
+                "expr": "histogram_quantile(0.99, sum(rate(node_handler_duration_seconds_bucket[1m])) by (le, handler))",
+                "legendFormat": "{{handler}} - p99",
                 "refId": "C"
               }
             ],
             "yaxes": [
-              {"format": "ms", "label": "Duration"},
+              {"format": "s", "label": "Duration"},
               {"format": "short"}
             ],
             "fill": 1,

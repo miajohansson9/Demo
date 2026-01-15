@@ -4,16 +4,14 @@ Unit tests for Node Label Operator Controller
 
 Tests critical edge cases including:
 - on_node_create: NodeLabelState authoritative for new/recreated nodes
-- on_node_update: Node authoritative for existing nodes (admin changes persist)
+- on_node_labels_changed: Node authoritative for existing nodes (admin changes persist)
 - Label deletion detection
 - Race conditions in CRD operations
 - Resync behavior
 """
 
-import json
 import unittest
 from unittest.mock import Mock, MagicMock, patch
-from datetime import datetime, timezone
 
 
 # Create custom ApiException class for testing
@@ -40,6 +38,7 @@ mock_kopf = MagicMock()
 mock_kopf.on.create = passthrough_decorator
 mock_kopf.on.update = passthrough_decorator
 mock_kopf.on.delete = passthrough_decorator
+mock_kopf.on.field = passthrough_decorator
 mock_kopf.timer = passthrough_decorator
 mock_kopf.on.startup = passthrough_decorator
 mock_kopf.on.probe.liveness = passthrough_decorator
@@ -165,8 +164,8 @@ class TestOnNodeCreate(unittest.TestCase):
                     mock_patch.assert_not_called()
 
 
-class TestOnNodeUpdate(unittest.TestCase):
-    """Test cases for on_node_update handler - Node authoritative"""
+class TestOnNodeLabelsChanged(unittest.TestCase):
+    """Test cases for on_node_labels_changed field handler - Node authoritative"""
 
     def setUp(self):
         """Set up test fixtures"""
@@ -182,59 +181,60 @@ class TestOnNodeUpdate(unittest.TestCase):
 
     def test_admin_adds_label(self):
         """CRITICAL: Admin adds a label - should persist to NodeLabelState"""
-        old = {"metadata": {"labels": {}}}
-        new = {"metadata": {"labels": {"persist.demo/type": "expensive"}}}
+        # With @kopf.on.field, old/new are the labels directly
+        old = {}
+        new = {"persist.demo/type": "expensive"}
         with patch.object(main, 'save_state') as mock_save:
-            main.on_node_update(name="test-node", old=old, new=new, diff=None)
+            main.on_node_labels_changed(name="test-node", old=old, new=new)
             mock_save.assert_called_once_with("test-node", {"persist.demo/type": "expensive"})
 
     def test_admin_changes_label_value(self):
         """CRITICAL: Admin changes label value - should persist new value"""
-        old = {"metadata": {"labels": {"persist.demo/type": "expensive"}}}
-        new = {"metadata": {"labels": {"persist.demo/type": "cheap"}}}
+        old = {"persist.demo/type": "expensive"}
+        new = {"persist.demo/type": "cheap"}
         with patch.object(main, 'save_state') as mock_save:
-            main.on_node_update(name="test-node", old=old, new=new, diff=None)
+            main.on_node_labels_changed(name="test-node", old=old, new=new)
             mock_save.assert_called_once_with("test-node", {"persist.demo/type": "cheap"})
 
     def test_admin_deletes_label(self):
         """CRITICAL: Admin deletes a label - should remove from NodeLabelState"""
-        old = {"metadata": {"labels": {"persist.demo/type": "expensive", "persist.demo/zone": "us-west"}}}
-        new = {"metadata": {"labels": {"persist.demo/type": "expensive"}}}
+        old = {"persist.demo/type": "expensive", "persist.demo/zone": "us-west"}
+        new = {"persist.demo/type": "expensive"}
         with patch.object(main, 'save_state') as mock_save:
-            main.on_node_update(name="test-node", old=old, new=new, diff=None)
+            main.on_node_labels_changed(name="test-node", old=old, new=new)
             mock_save.assert_called_once_with("test-node", {"persist.demo/type": "expensive"})
 
     def test_admin_deletes_all_labels(self):
         """CRITICAL: Admin deletes ALL owned labels - should save empty state"""
-        old = {"metadata": {"labels": {"persist.demo/type": "expensive"}}}
-        new = {"metadata": {"labels": {}}}
+        old = {"persist.demo/type": "expensive"}
+        new = {}
         with patch.object(main, 'save_state') as mock_save:
-            main.on_node_update(name="test-node", old=old, new=new, diff=None)
+            main.on_node_labels_changed(name="test-node", old=old, new=new)
             # Save empty dict instead of deleting (preserves CRD)
             mock_save.assert_called_once_with("test-node", {})
 
     def test_non_owned_label_change_ignored(self):
         """Changes to non-owned labels should be ignored"""
-        old = {"metadata": {"labels": {"kubernetes.io/hostname": "old-name", "persist.demo/type": "expensive"}}}
-        new = {"metadata": {"labels": {"kubernetes.io/hostname": "new-name", "persist.demo/type": "expensive"}}}
+        old = {"kubernetes.io/hostname": "old-name", "persist.demo/type": "expensive"}
+        new = {"kubernetes.io/hostname": "new-name", "persist.demo/type": "expensive"}
         with patch.object(main, 'save_state') as mock_save:
-            main.on_node_update(name="test-node", old=old, new=new, diff=None)
+            main.on_node_labels_changed(name="test-node", old=old, new=new)
             mock_save.assert_not_called()
 
     def test_multiple_label_changes(self):
         """Multiple label changes at once - add, remove, change"""
-        old = {"metadata": {"labels": {
+        old = {
             "persist.demo/type": "expensive",
             "persist.demo/zone": "us-west",
             "persist.demo/env": "prod"
-        }}}
-        new = {"metadata": {"labels": {
+        }
+        new = {
             "persist.demo/type": "cheap",
             "persist.demo/region": "east",
             "persist.demo/env": "prod"
-        }}}
+        }
         with patch.object(main, 'save_state') as mock_save:
-            main.on_node_update(name="test-node", old=old, new=new, diff=None)
+            main.on_node_labels_changed(name="test-node", old=old, new=new)
             expected = {
                 "persist.demo/type": "cheap",
                 "persist.demo/region": "east",
@@ -251,6 +251,8 @@ class TestResyncNode(unittest.TestCase):
         main.core_v1 = Mock()
         main.custom_api = Mock()
         main.logger = Mock()
+        main.labels_applied = Mock()
+        main.labels_applied.labels = Mock(return_value=Mock())
         main.handler_errors = Mock()
         main.handler_errors.labels = Mock(return_value=Mock())
         main.handler_duration = Mock()
@@ -282,13 +284,13 @@ class TestResyncNode(unittest.TestCase):
                 mock_save.assert_called_once_with("test-node", node_labels)
 
     def test_resync_state_has_labels_node_empty(self):
-        """NodeLabelState has labels but node doesn't - save empty state"""
+        """NodeLabelState has labels but node doesn't - restore (possible missed recreation)"""
         stored_labels = {"persist.demo/type": "expensive"}
         with patch.object(main, 'load_state', return_value=stored_labels):
-            with patch.object(main, 'save_state') as mock_save:
+            with patch.object(main, 'patch_node_labels') as mock_patch:
                 main.resync_node(name="test-node", labels={})
-                # Save empty dict instead of deleting (preserves CRD)
-                mock_save.assert_called_once_with("test-node", {})
+                # Restore labels to node (node might have been recreated)
+                mock_patch.assert_called_once_with("test-node", stored_labels)
 
 
 class TestLoadState(unittest.TestCase):
@@ -338,42 +340,100 @@ class TestLoadState(unittest.TestCase):
 
 
 class TestSaveState(unittest.TestCase):
-    """Test cases for save_state function"""
+    """Test cases for save_state function (replace with conflict-safe retries)"""
 
     def setUp(self):
         """Set up test fixtures"""
         main.custom_api = Mock()
         main.logger = Mock()
 
-    def test_race_condition_create_409_then_404(self):
-        """Race condition: 409 on create, 404 on replace, retry create"""
-        create_409 = MockApiException(status=409)
-        replace_404 = MockApiException(status=404)
-        main.custom_api.create_cluster_custom_object.side_effect = [create_409, None]
-        main.custom_api.get_cluster_custom_object.return_value = {"metadata": {"resourceVersion": "123"}}
-        main.custom_api.replace_cluster_custom_object.side_effect = replace_404
+    def test_replace_existing(self):
+        """Happy path: Replace existing NodeLabelState"""
+        main.custom_api.get_cluster_custom_object.return_value = {
+            "metadata": {"resourceVersion": "123"}
+        }
+        main.custom_api.replace_cluster_custom_object.return_value = None
+        
         main.save_state("test-node", {"persist.demo/type": "expensive"})
-        self.assertEqual(main.custom_api.create_cluster_custom_object.call_count, 2)
+        
         main.custom_api.replace_cluster_custom_object.assert_called_once()
-        main.logger.warning.assert_called_once()
-        self.assertIn("deleted during update", str(main.logger.warning.call_args))
+        # Verify resourceVersion is passed
+        call_args = main.custom_api.replace_cluster_custom_object.call_args
+        body = call_args[1]['body']
+        self.assertEqual(body["metadata"]["resourceVersion"], "123")
+        self.assertEqual(body["spec"]["labels"], {"persist.demo/type": "expensive"})
 
-    def test_normal_create_flow(self):
-        """Happy path: Create new NodeLabelState"""
+    def test_create_on_404(self):
+        """Create NodeLabelState when get returns 404 (doesn't exist)"""
+        main.custom_api.get_cluster_custom_object.side_effect = MockApiException(status=404)
         main.custom_api.create_cluster_custom_object.return_value = None
+        
         main.save_state("test-node", {"persist.demo/type": "expensive"})
+        
         main.custom_api.create_cluster_custom_object.assert_called_once()
         main.logger.info.assert_called_with("Created NodeLabelState for test-node")
 
-    def test_normal_update_flow(self):
-        """Happy path: Update existing NodeLabelState"""
-        create_409 = MockApiException(status=409)
-        main.custom_api.create_cluster_custom_object.side_effect = create_409
-        main.custom_api.get_cluster_custom_object.return_value = {"metadata": {"resourceVersion": "123"}}
+    def test_retry_on_race_create(self):
+        """Retry when create returns 409 (someone else created it)"""
+        main.custom_api.get_cluster_custom_object.side_effect = [
+            MockApiException(status=404),  # First get: doesn't exist
+            {"metadata": {"resourceVersion": "123"}}  # Second get: now exists
+        ]
+        main.custom_api.create_cluster_custom_object.side_effect = MockApiException(status=409)
         main.custom_api.replace_cluster_custom_object.return_value = None
+        
         main.save_state("test-node", {"persist.demo/type": "expensive"})
+        
+        # Should have retried with replace after create conflict
+        self.assertEqual(main.custom_api.get_cluster_custom_object.call_count, 2)
         main.custom_api.replace_cluster_custom_object.assert_called_once()
-        main.logger.debug.assert_called_with("Updated NodeLabelState for test-node")
+
+    @patch('main.time.sleep')
+    def test_retry_on_replace_conflict(self, mock_sleep):
+        """Retry with backoff when replace returns 409 (resourceVersion conflict)"""
+        main.custom_api.get_cluster_custom_object.side_effect = [
+            {"metadata": {"resourceVersion": "123"}},
+            {"metadata": {"resourceVersion": "124"}}
+        ]
+        main.custom_api.replace_cluster_custom_object.side_effect = [
+            MockApiException(status=409),  # First replace conflicts
+            None  # Second replace succeeds
+        ]
+        
+        main.save_state("test-node", {"persist.demo/type": "expensive"})
+        
+        # Should have retried
+        self.assertEqual(main.custom_api.replace_cluster_custom_object.call_count, 2)
+        # Should have slept with backoff
+        mock_sleep.assert_called_once_with(0.1)
+
+    def test_empty_labels_replaces(self):
+        """Replace with empty labels properly clears all labels"""
+        main.custom_api.get_cluster_custom_object.return_value = {
+            "metadata": {"resourceVersion": "123"}
+        }
+        main.custom_api.replace_cluster_custom_object.return_value = None
+        
+        main.save_state("test-node", {})
+        
+        call_args = main.custom_api.replace_cluster_custom_object.call_args
+        body = call_args[1]['body']
+        # Replace with empty labels dict
+        self.assertEqual(body["spec"]["labels"], {})
+
+    @patch('main.time.sleep')
+    def test_raises_after_max_retries(self, mock_sleep):
+        """Raises TemporaryError after max retries exhausted"""
+        main.custom_api.get_cluster_custom_object.return_value = {
+            "metadata": {"resourceVersion": "123"}
+        }
+        main.custom_api.replace_cluster_custom_object.side_effect = MockApiException(status=409)
+        
+        with self.assertRaises(Exception):  # kopf.TemporaryError mocked as Exception
+            main.save_state("test-node", {"persist.demo/type": "expensive"})
+        
+        # Should have tried 5 times
+        self.assertEqual(main.custom_api.replace_cluster_custom_object.call_count, 5)
 
 
 class TestAuthorityModelIntegration(unittest.TestCase):
@@ -394,7 +454,7 @@ class TestAuthorityModelIntegration(unittest.TestCase):
         main.handler_duration.labels = Mock(return_value=Mock())
 
     def test_full_node_lifecycle(self):
-        """Test complete node lifecycle: create, update, delete, recreate"""
+        """Test complete node lifecycle: create, update, recreate"""
         # Step 1: New node with initial labels
         with patch.object(main, 'load_state', return_value=None):
             with patch.object(main, 'save_state') as mock_save:
@@ -404,18 +464,17 @@ class TestAuthorityModelIntegration(unittest.TestCase):
                 )
                 mock_save.assert_called_once_with("lifecycle-node", {"persist.demo/type": "expensive"})
 
-        # Step 2: Admin changes the label
+        # Step 2: Admin changes the label (field handler gets labels directly)
         with patch.object(main, 'save_state') as mock_save:
-            main.on_node_update(
+            main.on_node_labels_changed(
                 name="lifecycle-node",
-                old={"metadata": {"labels": {"persist.demo/type": "expensive"}}},
-                new={"metadata": {"labels": {"persist.demo/type": "cheap"}}},
-                diff=None
+                old={"persist.demo/type": "expensive"},
+                new={"persist.demo/type": "cheap"}
             )
             mock_save.assert_called_once_with("lifecycle-node", {"persist.demo/type": "cheap"})
 
-        # Step 3: Node deleted (NodeLabelState preserved)
-        main.on_node_delete(name="lifecycle-node")
+        # Step 3: Node deleted - NodeLabelState is preserved (no delete handler needed)
+        # The CRD remains with the label state for when the node is recreated
 
         # Step 4: Node recreated - should get labels from NodeLabelState
         with patch.object(main, 'load_state', return_value={"persist.demo/type": "cheap"}):

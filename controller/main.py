@@ -24,7 +24,6 @@ from prometheus_client import Counter, Histogram, Gauge, start_http_server
 
 # Configuration from environment
 PERSIST_LABEL_PREFIX = os.getenv("PERSIST_LABEL_PREFIX", "persist.demo/")
-RESYNC_INTERVAL_SECONDS = int(os.getenv("RESYNC_INTERVAL_SECONDS", "300"))
 METRICS_PORT = int(os.getenv("METRICS_PORT", "9090"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
@@ -47,58 +46,44 @@ custom_api: Optional[client.CustomObjectsApi] = None
 
 # Prometheus metrics
 labels_applied = Counter(
-    'node_label_labels_applied_total',
+    'node_labels_applied_total',
     'Total number of labels applied to nodes from storage',
     ['node']
 )
 labels_synced = Counter(
-    'node_label_labels_synced_total',
+    'node_labels_synced_total',
     'Total number of label changes synced to storage',
     ['node', 'action']  # action: added, removed, changed
 )
 handler_errors = Counter(
-    'node_label_handler_errors_total',
+    'node_handler_errors_total',
     'Total number of handler errors',
     ['handler']
 )
 handler_duration = Histogram(
-    'node_label_handler_duration_seconds',
+    'node_handler_duration_seconds',
     'Time spent in handlers',
     ['handler']
 )
-nodes_tracked = Gauge(
-    'node_label_nodes_tracked',
-    'Number of nodes with stored labels'
-)
 
 
-def crd_name(node_name: str) -> str:
-    """Generate NodeLabelState resource name for a given node."""
-    return node_name  # Use node name directly for natural kubectl UX
-
-
-def get_owned_labels(labels: Optional[Dict[str, str]]) -> Dict[str, str]:
-    """Extract labels matching our prefix."""
-    if not labels:
-        return {}
-    return {k: v for k, v in labels.items() if k.startswith(PERSIST_LABEL_PREFIX)}
-
-
-def load_state(node_name: str) -> Optional[Dict[str, str]]:
+def get_owned_labels(node_name: str) -> Optional[Dict[str, str]]:
     """
-    Load persisted label state from NodeLabelState CRD.
+    Get owned labels for a node from NodeLabelState CRD.
     
     Returns:
-        dict: Persisted labels, or None if NodeLabelState doesn't exist
+        dict: Owned labels (matching our prefix) from storage
+        None: If CRD doesn't exist
     """
     try:
         obj = custom_api.get_cluster_custom_object(
             group=CRD_GROUP,
             version=CRD_VERSION,
             plural=CRD_PLURAL,
-            name=crd_name(node_name)
+            name=node_name
         )
-        return obj.get("spec", {}).get("labels", {})
+        stored_labels = obj.get("spec", {}).get("labels", {})
+        return {k: v for k, v in stored_labels.items() if k.startswith(PERSIST_LABEL_PREFIX)}
     except ApiException as e:
         if e.status == 404:
             return None
@@ -106,20 +91,15 @@ def load_state(node_name: str) -> Optional[Dict[str, str]]:
         raise
 
 
-def save_state(node_name: str, labels: Dict[str, str]):
-    """
-    Save label state to NodeLabelState CRD.
-    
-    Creates CRD if it doesn't exist, updates if it does.
-    Also updates the status subresource.
-    """
+def create_state(node_name: str, labels: Dict[str, str]):
+    """Create a new NodeLabelState CRD."""
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     
     body = {
         "apiVersion": f"{CRD_GROUP}/{CRD_VERSION}",
         "kind": "NodeLabelState",
         "metadata": {
-            "name": crd_name(node_name)
+            "name": node_name
         },
         "spec": {
             "nodeName": node_name,
@@ -127,55 +107,50 @@ def save_state(node_name: str, labels: Dict[str, str]):
         }
     }
     
-    try:
-        # Try to create first
-        custom_api.create_cluster_custom_object(
-            group=CRD_GROUP,
-            version=CRD_VERSION,
-            plural=CRD_PLURAL,
-            body=body
-        )
-        logger.info(f"Created NodeLabelState for {node_name}")
-        _update_status(node_name, labels, now)
-    except ApiException as e:
-        if e.status == 409:  # Already exists
-            try:
-                # Get current to preserve resourceVersion
-                current = custom_api.get_cluster_custom_object(
-                    group=CRD_GROUP,
-                    version=CRD_VERSION,
-                    plural=CRD_PLURAL,
-                    name=crd_name(node_name)
-                )
-                body["metadata"]["resourceVersion"] = current["metadata"]["resourceVersion"]
-                
-                custom_api.replace_cluster_custom_object(
-                    group=CRD_GROUP,
-                    version=CRD_VERSION,
-                    plural=CRD_PLURAL,
-                    name=crd_name(node_name),
-                    body=body
-                )
-                logger.debug(f"Updated NodeLabelState for {node_name}")
-                _update_status(node_name, labels, now)
-            except ApiException as replace_err:
-                if replace_err.status == 404:
-                    # Resource was deleted between 409 and replace - retry create
-                    logger.warning(f"NodeLabelState deleted during update, recreating for {node_name}")
-                    custom_api.create_cluster_custom_object(
-                        group=CRD_GROUP,
-                        version=CRD_VERSION,
-                        plural=CRD_PLURAL,
-                        body=body
-                    )
-                    logger.info(f"Created NodeLabelState for {node_name} (retry)")
-                    _update_status(node_name, labels, now)
-                else:
-                    logger.error(f"Error replacing NodeLabelState for {node_name}: {replace_err}")
-                    raise
-        else:
-            logger.error(f"Error saving NodeLabelState for {node_name}: {e}")
-            raise
+    custom_api.create_cluster_custom_object(
+        group=CRD_GROUP,
+        version=CRD_VERSION,
+        plural=CRD_PLURAL,
+        body=body
+    )
+    logger.info(f"Created NodeLabelState for {node_name}")
+    _update_status(node_name, labels, now)
+
+
+def save_state(node_name: str, labels: Dict[str, str]):
+    """Update existing NodeLabelState CRD. Assumes CRD already exists."""
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    
+    # Get current to preserve resourceVersion
+    current = custom_api.get_cluster_custom_object(
+        group=CRD_GROUP,
+        version=CRD_VERSION,
+        plural=CRD_PLURAL,
+        name=node_name
+    )
+    
+    body = {
+        "apiVersion": f"{CRD_GROUP}/{CRD_VERSION}",
+        "kind": "NodeLabelState",
+        "metadata": {
+            "name": node_name,
+            "resourceVersion": current["metadata"]["resourceVersion"]
+        },
+        "spec": {
+            "nodeName": node_name,
+            "labels": labels
+        }
+    }
+    
+    custom_api.replace_cluster_custom_object(
+        group=CRD_GROUP,
+        version=CRD_VERSION,
+        plural=CRD_PLURAL,
+        name=node_name,
+        body=body
+    )
+    logger.debug(f"Updated NodeLabelState for {node_name}")
+    _update_status(node_name, labels, now)
 
 
 def _update_status(node_name: str, labels: Dict[str, str], timestamp: str):
@@ -191,7 +166,7 @@ def _update_status(node_name: str, labels: Dict[str, str], timestamp: str):
             group=CRD_GROUP,
             version=CRD_VERSION,
             plural=CRD_PLURAL,
-            name=crd_name(node_name),
+            name=node_name,
             body=status_body
         )
     except ApiException as e:
@@ -216,41 +191,6 @@ def patch_node_labels(node_name: str, labels: Dict[str, str]):
 # Kopf Handlers
 # =============================================================================
 
-@kopf.on.startup()
-def on_startup(settings: kopf.OperatorSettings, **kwargs):
-    """Initialize the controller on startup."""
-    global core_v1, custom_api
-    
-    # Load Kubernetes config
-    try:
-        config.load_incluster_config()
-        logger.info("Loaded in-cluster config")
-    except config.ConfigException:
-        try:
-            config.load_kube_config()
-            logger.info("Loaded kubeconfig")
-        except config.ConfigException:
-            raise kopf.PermanentError("Could not load Kubernetes config")
-    
-    # Initialize API clients
-    core_v1 = client.CoreV1Api()
-    custom_api = client.CustomObjectsApi()
-    
-    # Start Prometheus metrics server (on different port than kopf's health)
-    start_http_server(METRICS_PORT)
-    logger.info(f"Metrics server started on port {METRICS_PORT}")
-    
-    # Configure kopf settings
-    settings.posting.level = logging.WARNING
-    settings.watching.server_timeout = 600
-    settings.watching.client_timeout = 660
-    
-    logger.info("Node Label Operator started")
-    logger.info(f"  Label prefix: {PERSIST_LABEL_PREFIX}")
-    logger.info(f"  Storage: NodeLabelState CRD ({CRD_GROUP}/{CRD_VERSION})")
-    logger.info(f"  Resync interval: {RESYNC_INTERVAL_SECONDS}s")
-
-
 @kopf.on.create('', 'v1', 'nodes', retries=5, backoff=10)
 def on_node_create(name: str, labels: Optional[Dict[str, str]], **kwargs):
     """
@@ -261,40 +201,19 @@ def on_node_create(name: str, labels: Optional[Dict[str, str]], **kwargs):
     """
     start_time = time.time()
     try:
-        stored_labels = load_state(name)
+        # Get owned labels from storage
+        stored_owned = get_owned_labels(name)
         
-        if stored_labels is None:
-            # No stored state - this is a truly new node
-            # Capture any owned labels it might have
-            owned = get_owned_labels(labels)
-            if owned:
-                save_state(name, owned)
-                logger.info(f"New node {name}: captured {len(owned)} initial labels")
-            else:
-                logger.debug(f"New node {name}: no owned labels to capture")
+        # Check if CRD exists and has labels to restore
+        if stored_owned is None or not stored_owned:
+            # No CRD or no stored labels to restore
             return
         
-        # Filter to owned labels
-        owned_stored = get_owned_labels(stored_labels)
-        
-        if not owned_stored:
-            logger.debug(f"New node {name}: NodeLabelState exists but no owned labels")
-            return
-        
-        # Check what labels the node currently has
-        current_owned = get_owned_labels(labels)
-        
-        # Find labels to apply (in storage but not on node)
-        labels_to_apply = {k: v for k, v in owned_stored.items() 
-                          if k not in current_owned or current_owned[k] != v}
-        
-        if labels_to_apply:
-            patch_node_labels(name, labels_to_apply)
-            labels_applied.labels(node=name).inc(len(labels_to_apply))
-            logger.info(f"Node {name} created: applied {len(labels_to_apply)} labels from NodeLabelState")
-        else:
-            logger.debug(f"Node {name} created: all labels already present")
-            
+        # Apply all stored labels (node shouldn't have any of our labels yet)
+        patch_node_labels(name, stored_owned)
+        labels_applied.labels(node=name).inc(len(stored_owned))
+        logger.info(f"Node {name} created: applied {len(stored_owned)} labels from NodeLabelState")
+
     except ApiException as e:
         handler_errors.labels(handler='on_create').inc()
         if e.status >= 500:
@@ -304,23 +223,26 @@ def on_node_create(name: str, labels: Optional[Dict[str, str]], **kwargs):
         handler_duration.labels(handler='on_create').observe(time.time() - start_time)
 
 
-@kopf.on.update('', 'v1', 'nodes', retries=5, backoff=10)
-def on_node_update(name: str, old: Dict, new: Dict, diff: object, **kwargs):
+@kopf.on.field('', 'v1', 'nodes', field='metadata.labels', retries=5, backoff=10)
+def on_node_labels_changed(name: str, old: Optional[Dict[str, str]], new: Optional[Dict[str, str]], **kwargs):
     """
-    Handle node updates.
+    Handle node label changes.
+    
+    Uses field handler to only trigger on metadata.labels changes,
+    avoiding unnecessary invocations on status updates.
     
     Node is authoritative: Sync label changes to NodeLabelState.
     This allows admins to modify/delete labels and have changes persist.
     """
     start_time = time.time()
     try:
-        # Extract labels from old and new state
-        old_labels = old.get('metadata', {}).get('labels', {}) or {}
-        new_labels = new.get('metadata', {}).get('labels', {}) or {}
+        # old and new are the label dicts directly (from field handler)
+        old_labels = old or {}
+        new_labels = new or {}
         
         # Filter to owned labels
-        old_owned = get_owned_labels(old_labels)
-        new_owned = get_owned_labels(new_labels)
+        old_owned = {k: v for k, v in old_labels.items() if k.startswith(PERSIST_LABEL_PREFIX)}
+        new_owned = {k: v for k, v in new_labels.items() if k.startswith(PERSIST_LABEL_PREFIX)}
         
         # Check if owned labels changed
         if old_owned == new_owned:
@@ -332,9 +254,14 @@ def on_node_update(name: str, old: Dict, new: Dict, diff: object, **kwargs):
         removed = set(old_owned.keys()) - set(new_owned.keys())
         changed = {k for k in old_owned if k in new_owned and old_owned[k] != new_owned[k]}
         
-        # Node is authoritative - persist current state to NodeLabelState
-        # Save even if empty (preserves CRD for future extensibility)
-        save_state(name, new_owned)
+        # Check if CRD exists
+        stored_owned = get_owned_labels(name)
+        if stored_owned is None:
+            # CRD doesn't exist - create it
+            create_state(name, new_owned)
+        else:
+            # CRD exists - update it
+            save_state(name, new_owned)
         
         # Update metrics
         if added:
@@ -348,42 +275,35 @@ def on_node_update(name: str, old: Dict, new: Dict, diff: object, **kwargs):
                    f"+{len(added)} added, -{len(removed)} removed, ~{len(changed)} changed")
         
     except ApiException as e:
-        handler_errors.labels(handler='on_update').inc()
+        handler_errors.labels(handler='on_labels_changed').inc()
         if e.status >= 500:
             raise kopf.TemporaryError(f"API server error: {e}", delay=30)
         raise kopf.PermanentError(f"Unrecoverable error: {e}")
     finally:
-        handler_duration.labels(handler='on_update').observe(time.time() - start_time)
+        handler_duration.labels(handler='on_labels_changed').observe(time.time() - start_time)
 
 
-@kopf.timer('', 'v1', 'nodes', interval=RESYNC_INTERVAL_SECONDS, sharp=True)
-def resync_node(name: str, labels: Optional[Dict[str, str]], **kwargs):
-    """
-    Periodic resync as a safety net.
+@kopf.on.startup()
+def configure(settings: kopf.OperatorSettings, **_):
+    """Configure operator on startup."""
+    global core_v1, custom_api
     
-    Catches any missed events due to network issues or controller restarts.
-    Uses node-authoritative model (same as on_update).
-    """
-    start_time = time.time()
+    # Load kubeconfig
     try:
-        owned_labels = get_owned_labels(labels)
-        stored_labels = load_state(name) or {}
-        stored_owned = get_owned_labels(stored_labels)
-        
-        # If node has labels but storage doesn't match, sync to storage
-        if owned_labels != stored_owned:
-            save_state(name, owned_labels)
-            if owned_labels:
-                logger.info(f"Resync {name}: synced {len(owned_labels)} labels to NodeLabelState")
-            else:
-                logger.info(f"Resync {name}: cleared labels in NodeLabelState (admin removed them)")
-        else:
-            logger.debug(f"Resync {name}: in sync")
-            
-    except ApiException as e:
-        handler_errors.labels(handler='resync').inc()
-        if e.status >= 500:
-            raise kopf.TemporaryError(f"API server error during resync: {e}", delay=60)
-        logger.error(f"Error during resync for {name}: {e}")
-    finally:
-        handler_duration.labels(handler='resync').observe(time.time() - start_time)
+        config.load_incluster_config()
+        logger.info("Loaded in-cluster configuration")
+    except config.ConfigException:
+        config.load_kube_config()
+        logger.info("Loaded local kubeconfig")
+    
+    # Initialize API clients
+    core_v1 = client.CoreV1Api()
+    custom_api = client.CustomObjectsApi()
+    
+    # Start Prometheus metrics server
+    start_http_server(METRICS_PORT)
+    logger.info(f"Started metrics server on port {METRICS_PORT}")
+    
+    # Configure kopf settings
+    settings.posting.level = logging.WARNING  # Reduce noise in logs
+    logger.info(f"Operator starting with label prefix: {PERSIST_LABEL_PREFIX}")
