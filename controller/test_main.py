@@ -185,10 +185,8 @@ class TestOnNodeUpdate(unittest.TestCase):
         old = {"metadata": {"labels": {}}}
         new = {"metadata": {"labels": {"persist.demo/type": "expensive"}}}
         with patch.object(main, 'save_state') as mock_save:
-            with patch.object(main, 'delete_state') as mock_delete:
-                main.on_node_update(name="test-node", old=old, new=new, diff=None)
-                mock_save.assert_called_once_with("test-node", {"persist.demo/type": "expensive"})
-                mock_delete.assert_not_called()
+            main.on_node_update(name="test-node", old=old, new=new, diff=None)
+            mock_save.assert_called_once_with("test-node", {"persist.demo/type": "expensive"})
 
     def test_admin_changes_label_value(self):
         """CRITICAL: Admin changes label value - should persist new value"""
@@ -203,10 +201,8 @@ class TestOnNodeUpdate(unittest.TestCase):
         old = {"metadata": {"labels": {"persist.demo/type": "expensive", "persist.demo/zone": "us-west"}}}
         new = {"metadata": {"labels": {"persist.demo/type": "expensive"}}}
         with patch.object(main, 'save_state') as mock_save:
-            with patch.object(main, 'delete_state') as mock_delete:
-                main.on_node_update(name="test-node", old=old, new=new, diff=None)
-                mock_save.assert_called_once_with("test-node", {"persist.demo/type": "expensive"})
-                mock_delete.assert_not_called()
+            main.on_node_update(name="test-node", old=old, new=new, diff=None)
+            mock_save.assert_called_once_with("test-node", {"persist.demo/type": "expensive"})
 
     def test_admin_deletes_all_labels(self):
         """CRITICAL: Admin deletes ALL owned labels - should save empty state"""
@@ -222,10 +218,8 @@ class TestOnNodeUpdate(unittest.TestCase):
         old = {"metadata": {"labels": {"kubernetes.io/hostname": "old-name", "persist.demo/type": "expensive"}}}
         new = {"metadata": {"labels": {"kubernetes.io/hostname": "new-name", "persist.demo/type": "expensive"}}}
         with patch.object(main, 'save_state') as mock_save:
-            with patch.object(main, 'delete_state') as mock_delete:
-                main.on_node_update(name="test-node", old=old, new=new, diff=None)
-                mock_save.assert_not_called()
-                mock_delete.assert_not_called()
+            main.on_node_update(name="test-node", old=old, new=new, diff=None)
+            mock_save.assert_not_called()
 
     def test_multiple_label_changes(self):
         """Multiple label changes at once - add, remove, change"""
@@ -380,33 +374,6 @@ class TestSaveState(unittest.TestCase):
         main.save_state("test-node", {"persist.demo/type": "expensive"})
         main.custom_api.replace_cluster_custom_object.assert_called_once()
         main.logger.debug.assert_called_with("Updated NodeLabelState for test-node")
-
-
-class TestDeleteState(unittest.TestCase):
-    """Test cases for delete_state function"""
-
-    def setUp(self):
-        """Set up test fixtures"""
-        main.custom_api = Mock()
-        main.logger = Mock()
-
-    def test_delete_success(self):
-        """Happy path: Delete NodeLabelState"""
-        main.custom_api.delete_cluster_custom_object.return_value = None
-        main.delete_state("test-node")
-        main.custom_api.delete_cluster_custom_object.assert_called_once()
-        main.logger.info.assert_called_with("Deleted NodeLabelState for test-node")
-
-    def test_delete_not_found_ignored(self):
-        """NodeLabelState already deleted - should not raise"""
-        main.custom_api.delete_cluster_custom_object.side_effect = MockApiException(status=404)
-        main.delete_state("test-node")
-
-    def test_delete_error_propagates(self):
-        """Non-404 errors should propagate"""
-        main.custom_api.delete_cluster_custom_object.side_effect = MockApiException(status=500)
-        with self.assertRaises(MockApiException):
-            main.delete_state("test-node")
 
 
 class TestAuthorityModelIntegration(unittest.TestCase):

@@ -199,22 +199,6 @@ def _update_status(node_name: str, labels: Dict[str, str], timestamp: str):
         logger.warning(f"Failed to update status for {node_name}: {e}")
 
 
-def delete_state(node_name: str):
-    """Delete NodeLabelState for a node (optional cleanup)."""
-    try:
-        custom_api.delete_cluster_custom_object(
-            group=CRD_GROUP,
-            version=CRD_VERSION,
-            plural=CRD_PLURAL,
-            name=crd_name(node_name)
-        )
-        logger.info(f"Deleted NodeLabelState for {node_name}")
-    except ApiException as e:
-        if e.status != 404:
-            logger.error(f"Error deleting NodeLabelState for {node_name}: {e}")
-            raise
-
-
 def patch_node_labels(node_name: str, labels: Dict[str, str]):
     """
     Patch node to apply the given labels.
@@ -372,26 +356,6 @@ def on_node_update(name: str, old: Dict, new: Dict, diff: object, **kwargs):
         handler_duration.labels(handler='on_update').observe(time.time() - start_time)
 
 
-@kopf.on.delete('', 'v1', 'nodes', retries=3, backoff=5)
-def on_node_delete(name: str, **kwargs):
-    """
-    Handle node deletion.
-    
-    Preserve NodeLabelState for potential node recreation.
-    This allows labels to be restored when the node comes back.
-    """
-    start_time = time.time()
-    try:
-        # Intentionally preserve NodeLabelState for recreation scenario
-        logger.info(f"Node {name} deleted, preserving NodeLabelState for potential recreation")
-        
-        # Note: If you want to cleanup stale NodeLabelStates for permanently removed nodes,
-        # you could add a TTL or separate cleanup mechanism
-        
-    finally:
-        handler_duration.labels(handler='on_delete').observe(time.time() - start_time)
-
-
 @kopf.timer('', 'v1', 'nodes', interval=RESYNC_INTERVAL_SECONDS, sharp=True)
 def resync_node(name: str, labels: Optional[Dict[str, str]], **kwargs):
     """
@@ -407,7 +371,6 @@ def resync_node(name: str, labels: Optional[Dict[str, str]], **kwargs):
         stored_owned = get_owned_labels(stored_labels)
         
         # If node has labels but storage doesn't match, sync to storage
-        # (node is authoritative for existing nodes)
         if owned_labels != stored_owned:
             save_state(name, owned_labels)
             if owned_labels:
@@ -424,7 +387,3 @@ def resync_node(name: str, labels: Optional[Dict[str, str]], **kwargs):
         logger.error(f"Error during resync for {name}: {e}")
     finally:
         handler_duration.labels(handler='resync').observe(time.time() - start_time)
-
-
-# Note: Health probes are handled automatically by kopf via the --liveness CLI flag.
-# Kopf exposes /healthz endpoint that Kubernetes probes can check.
